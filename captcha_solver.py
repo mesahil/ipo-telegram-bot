@@ -7,12 +7,19 @@ from PIL import Image
 import google.generativeai as genai
 
 # Configure Gemini API
-_API_KEY = os.getenv("GEMINI_API_KEY")
-if not _API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable not set")
+_API_KEY = None
+_MODEL = None
 
-genai.configure(api_key=_API_KEY)
-_MODEL = genai.GenerativeModel("gemini-pro-vision")
+
+def _ensure_model():
+    """Initialise Gemini model lazily so import doesn't fail if env var set later."""
+    global _API_KEY, _MODEL  # pylint: disable=global-statement
+    if _MODEL is None:
+        _API_KEY = os.getenv("GEMINI_API_KEY")
+        if not _API_KEY:
+            raise RuntimeError("GEMINI_API_KEY environment variable not set")
+        genai.configure(api_key=_API_KEY)
+        _MODEL = genai.GenerativeModel("gemini-pro-vision")
 
 
 async def solve(image_bytes: bytes) -> str:
@@ -24,6 +31,8 @@ async def solve(image_bytes: bytes) -> str:
     Returns:
         Upper-cased alphanumeric text extracted from the image.
     """
+    _ensure_model()
+
     # Gemini requires base64 encoded inline data for images
     b64 = base64.b64encode(image_bytes).decode()
     content: dict[str, Any] = {

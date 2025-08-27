@@ -25,8 +25,20 @@ logger = logging.getLogger(__name__)
 
 # BEGIN NEW IMPLEMENTATION ---------------------------------------------
 
-_BSE_API = "https://api.bseindia.com/BseIndiaAPI/api/GetPublicIssue_par/w"
-_NSE_URL = "https://www.nseindia.com/api/ipo-current-issue"
+_GROWW_CLOSED = "https://groww.in/v1/api/primaries/v1/ipo/closed"
+
+# Map registrar URL substring to registrar code
+_RTA_MAP = {
+    "linkintime": "mufg",
+    "mpms.mufg": "mufg",
+    "in.mpms.mufg": "mufg",
+    "kfintech": "kfin",
+    "ipostatus.kfintech": "kfin",
+    "bigshareonline": "bigshare",
+    "ipo.bigshareonline": "bigshare",
+    "masserv": "mas",
+}
+
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -47,103 +59,48 @@ REGISTRAR_KEYWORDS = {
 
 
 
-async def _fetch_bse(session: httpx.AsyncClient) -> list[dict]:
-    """Return list of IPO dicts from new BSE JSON endpoint (show all)."""
-    resp = await session.get(_BSE_API, headers={**_HEADERS, "Referer": "https://www.bseindia.com/"})
+async def _fetch_closed_ipos(session: httpx.AsyncClient) -> list[dict]:
+    """Return non-SME closed IPO list with inferred registrar."""
+    resp = await session.get(_GROWW_CLOSED, headers=_HEADERS)
     resp.raise_for_status()
     data = resp.json()
-    # print("BSE direct response snippet:", json.dumps(data, indent=2))
-
+    print("Groww closed IPO response snippet:", json.dumps(data, indent=2))
     result: list[dict] = []
-    for item in data.get("Table", []):
-        if item.get("eXCHANGE_PLATFORM", "").lower() != "mainboard":
-            continue  # only mainboard issues
-        if item.get("IR_flag", "").upper() != "IPO":
-            continue  # only IPO, exclude FPO/RI etc.
-        name = str(item.get("Scrip_Name", "")).strip().title()
-        if not name:
+    for item in data.get("ipoList", []):
+        if item.get("isSme"):
+            continue  # skip SME
+        # Skip if already listed or listingPrice present or listing timestamp passed
+        ts = item.get("listingTimestamp") or 0
+        if item.get("listingPrice") is not None:
             continue
-        scrip_cd = str(item.get("Scrip_cd")).strip()
-        ipo_no = str(item.get("IPO_NO")).strip()
-        start_dt_raw = item.get("Start_Dt", "")
-        start_dt = ""
-        if start_dt_raw:
-            # convert 2025-08-26T00:00:00 -> 26/08/2025
-            start_dt = start_dt_raw.split("T")[0]
-            y, m, d = start_dt.split("-")
-            start_dt = f"{d}/{m}/{y}"
-        result.append({"code": scrip_cd, "ipo_no": ipo_no, "start": start_dt, "name": name})
+        import time
+        now_ms = int(time.time() * 1000)
+        if ts and ts < now_ms:
+            continue
+
+        name = item["companyName"].strip()
+        symbol = item["symbol"]
+        rta_link = (item.get("rtaLink") or "").lower()
+        registrar = "mufg"  # default
+        for key, val in _RTA_MAP.items():
+            if key in rta_link:
+                registrar = val
+                break
+        result.append({"name": name, "code": symbol, "registrar": registrar})
+    
     return result
 
 
-# async def _fetch_nse(session: Optional[httpx.AsyncClient] = None) -> list[dict]:
-#     """Fetch NSE IPO JSON directly without prior homepage visit."""
-#     close_client = False
-#     if session is None:
-#         session = httpx.AsyncClient(timeout=10, headers=_HEADERS)
-#         close_client = True
-#     try:
-#         # Hit NSE homepage to grab cookies (bypasses 401 on API).
-#         if session:
-#             await session.get("https://www.nseindia.com", headers=_HEADERS)
-#         api_headers = {
-#             **_HEADERS,
-#             "Referer": "https://www.nseindia.com/",
-#             "Accept": "application/json",
-#             "X-Requested-With": "XMLHttpRequest",
-#         }
-#         resp = await session.get(_NSE_URL, headers=api_headers)
-#         if resp.status_code == 401:
-#             # Sometimes cookies take a moment; retry once after short sleep.
-#             await asyncio.sleep(1)
-#             resp = await session.get(_NSE_URL, headers=api_headers)
-#         print("NSE direct response (first 200):", resp.text[:200])
-#         resp.raise_for_status()
-#     finally:
-#         if close_client:
-#             await session.aclose()
 
-#     # If JSON parsing fails, return empty list.
-#     try:
-#         data = resp.json()
-#     except Exception:
-#         return []
-
-#     items = data if isinstance(data, list) else data.get("data", [])
-#     result: list[dict] = []
-#     for item in items:
-#         if item.get("series", "").upper() != "EQ":
-#             continue  # keep only main equity series
-#         name = str(item.get("companyName") or item.get("issuerName") or "").strip()
-#         if not name:
-#             continue
-#         code = str(item.get("symbol") or item.get("securityCode") or name.split()[0]).strip().upper()
-#         result.append({"code": code, "name": name})
-#     return result
 
 
 async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
     """Fetch latest unique mainboard IPO list from BSE & NSE."""
 
     async with httpx.AsyncClient(timeout=15, headers=_HEADERS, http2=True) as session:
-        nse_list = []  # NSE temporarily disabled
-        bse_list = await _fetch_bse(session)
+        catalogue = await _fetch_closed_ipos(session)
 
-    combined: list[dict] = []
-    seen_names: set[str] = set()
-
-    for source in (bse_list, nse_list):
-        if isinstance(source, Exception):
-            logger.warning("Could not fetch IPO list from one exchange: %s", source)
-            continue
-        for ipo in source:
-            key = ipo["name"].upper()
-            if key not in seen_names:
-                seen_names.add(key)
-                combined.append(ipo)
-
-
-    return combined
+    return catalogue
 
 # END NEW IMPLEMENTATION -----------------------------------------------
 
@@ -152,10 +109,7 @@ def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for idx, ipo in enumerate(catalogue, start=1):
-        cb_data = (
-            f"ipo:{ipo['code']}:{ipo.get('ipo_no','')}:{ipo.get('start','')}:"
-            f"{ipo['name'].replace(':', ' ')}"
-        )
+        cb_data = f"ipo:{ipo['registrar']}:{ipo['code']}:{ipo['name'].replace(':',' ')}"
         row.append(InlineKeyboardButton(ipo["name"], callback_data=cb_data))
         if idx % 2 == 0:
             buttons.append(row)
@@ -181,15 +135,12 @@ def get_pan_list() -> List[str]:
 async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    parts = query.data.split(":", 4)
-    _, scrip_cd, ipo_no, start_dt, ipo_name = parts
+    parts = query.data.split(":", 3)
+    _, registrar, code, ipo_name = parts
     pans = get_pan_list()
     if not pans:
         await query.edit_message_text("No PANs configured. Set PAN_LIST env var.")
         return
-
-    async with httpx.AsyncClient(timeout=15, headers=_HEADERS, http2=True) as resolver:
-        registrar = await _resolve_registrar(resolver, scrip_cd, ipo_no, start_dt)
 
     client: RegistrarClient = get_client_for_registrar(registrar)
     if client is None:
@@ -199,7 +150,7 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text("Fetching status, please wait…")
 
     async with httpx.AsyncClient(timeout=20) as session:
-        tasks = [client.status_by_pan(session, pan=pan, ipo_code=scrip_cd) for pan in pans]
+        tasks = [client.status_by_pan(session, pan=pan, ipo_code=code) for pan in pans]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     lines = [f"\n*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"]
