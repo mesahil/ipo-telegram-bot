@@ -64,7 +64,7 @@ async def _fetch_closed_ipos(session: httpx.AsyncClient) -> list[dict]:
     resp = await session.get(_GROWW_CLOSED, headers=_HEADERS)
     resp.raise_for_status()
     data = resp.json()
-    print("Groww closed IPO response snippet:", json.dumps(data, indent=2))
+    # print("Groww closed IPO response snippet:", json.dumps(data, indent=2))
     result: list[dict] = []
     for item in data.get("ipoList", []):
         if item.get("isSme"):
@@ -109,7 +109,7 @@ def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for idx, ipo in enumerate(catalogue, start=1):
-        cb_data = f"ipo:{ipo['registrar']}:{ipo['code']}:{ipo['name'].replace(':',' ')}"
+        cb_data = f"ipo:{ipo['registrar']}:{ipo['name'].replace(':',' ')}"
         row.append(InlineKeyboardButton(ipo["name"], callback_data=cb_data))
         if idx % 2 == 0:
             buttons.append(row)
@@ -135,8 +135,8 @@ def get_pan_list() -> List[str]:
 async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    parts = query.data.split(":", 3)
-    _, registrar, code, ipo_name = parts
+    parts = query.data.split(":", 2)
+    _, registrar, ipo_name = parts
     pans = get_pan_list()
     if not pans:
         await query.edit_message_text("No PANs configured. Set PAN_LIST env var.")
@@ -150,19 +150,19 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text("Fetching status, please wait…")
 
     async with httpx.AsyncClient(timeout=20) as session:
-        tasks = [client.status_by_pan(session, pan=pan, ipo_code=code) for pan in pans]
+        tasks = [client.status_by_pan(session, pan=pan, company_name=ipo_name) for pan in pans]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     lines = [f"\n*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"]
     for pan, result in zip(pans, results):
         if isinstance(result, Exception):
             logger.exception("Error fetching status", exc_info=result)
-            lines.append(f"`{pan}`  –  _error fetching status_")
+            lines.append(f"{pan}  –  error fetching status")
         else:
-            lines.append(f"`{pan}`  –  {result}")
+            lines.append(f"{pan}  –  {result}")
 
     text = "\n".join(lines)
-    await query.edit_message_text(text=text, parse_mode="Markdown")
+    await query.edit_message_text(text=text)
 
 
 async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: str, start_dt: str) -> str:
@@ -171,7 +171,7 @@ async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: 
         "https://www.bseindia.com/markets/publicIssues/DisplayIPO.aspx"
         f"?id={scrip_cd}&type=IPO&idtype=1&status=L&IPONo={ipo_no}&startdt={start_dt}"
     )
-    print("IPO detail URL:", url)
+    # print("IPO detail URL:", url)
     try:
         page = await session.get(url, headers=_HEADERS, timeout=10)
         page.raise_for_status()
@@ -185,7 +185,7 @@ async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: 
     except Exception:
         reg_full = ""
 
-    print("Registrar full:", reg_full)
+    # print("Registrar full:", reg_full)
 
     if "INTIME" in reg_full or "MUFG" in reg_full or "LINK" in reg_full:
         return "mufg"

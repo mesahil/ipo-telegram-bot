@@ -4,60 +4,86 @@ import httpx
 
 from . import RegistrarClient
 
-import base64
 from bs4 import BeautifulSoup
-from captcha_solver import solve
 
 
 class BigshareClient(RegistrarClient):
-    """Client for Bigshare Services IPO allotment status (supports captcha)."""
+    """Client for Bigshare IPO allotment via FetchIpodetails; no captcha for PAN."""
 
-    BASE = "https://ipo.bigshareonline.com/api"
+    HOST = "https://ipo1.bigshareonline.com"
 
-    async def _get_captcha(self, session: httpx.AsyncClient):
-        r = await session.get(f"{self.BASE}/GenerateCaptcha")
-        r.raise_for_status()
-        j = r.json()
-        cid = j["CaptchaId"]
-        img_b64 = j["CaptchaText"].split(",")[-1]
-        return cid, base64.b64decode(img_b64)
+    async def _company_map(self, session: httpx.AsyncClient) -> dict[str, str]:
+        """Scrape dropdown to build COMPANY_NAME -> code map."""
+        page = await session.get(f"{self.HOST}/ipo_status.html")
+        page.raise_for_status()
+        soup = BeautifulSoup(page.text, "html.parser")
+        sel = soup.find("select", id="ddlCompany")
+        if not sel:
+            return {}
+        mapping: dict[str, str] = {}
+        for opt in sel.find_all("option"):
+            code = opt.get("value", "").strip()
+            name = opt.text.strip().upper()
+            if code and name:
+                mapping[name] = code
+        return mapping
 
-    async def status_by_pan(self, session: httpx.AsyncClient, *, pan: str, ipo_code: str) -> str:  # noqa: D401
-        # Try without captcha first
-        quick_payload = {
-            "IPOId": ipo_code,
-            "PAN": pan.upper(),
-            "CaptchaText": "",
-            "CaptchaId": "",
+    async def status_by_pan(
+        self,
+        session: httpx.AsyncClient,
+        *,
+        pan: str,
+        ipo_code: str | None = None,
+        company_name: str | None = None,
+    ) -> str:  # noqa: D401
+        # Prefer company_name if provided; else fallback to ipo_code
+        target_name = (company_name or ipo_code or "").strip()
+        cmap = await self._company_map(session)
+        print("cmap", cmap)
+        # First try exact match on uppercase name
+        key = target_name.upper()
+        company_code = cmap.get(key)
+        if not company_code:
+            # Fallback: substring containment (both directions)
+            for name_key, code_val in cmap.items():
+                if key in name_key or name_key in key:
+                    company_code = code_val
+                    break
+        print("company_code", company_code)
+        if not company_code:
+            return "IPO not yet available on Bigshare"
+
+        payload = {
+            "Applicationno": "",
+            "Company": company_code,
+            "SelectionType": "PN",
+            "PanNo": pan.upper(),
+            "txtcsdl": "",
+            "txtDPID": "",
+            "txtClId": "",
+            "ddlType": "0",
+            "lang": "en",
         }
-        try:
-            resp0 = await session.post(f"{self.BASE}/GetApplicantAllotmentStatus", json=quick_payload)
-            resp0.raise_for_status()
-            d0 = resp0.json()
-            if d0.get("Status"):
-                html = d0.get("Result", "")
-                return BeautifulSoup(html, "html.parser").get_text(" ", strip=True) or "No record found"
-            if "captcha" not in d0.get("Message", "").lower():
-                return d0.get("Message", "No record found")
-        except Exception:
-            pass  # fall through to captcha path
-
-        # captcha path
-        for _ in range(2):
-            cid, img_bytes = await self._get_captcha(session)
-            text = await solve(img_bytes)
-            payload = {
-                "IPOId": ipo_code,
-                "PAN": pan.upper(),
-                "CaptchaText": text,
-                "CaptchaId": cid,
-            }
-            r = await session.post(f"{self.BASE}/GetApplicantAllotmentStatus", json=payload)
-            r.raise_for_status()
-            d = r.json()
-            if d.get("Status"):
-                html = d.get("Result", "")
-                return BeautifulSoup(html, "html.parser").get_text(" ", strip=True) or "No record found"
-            if "captcha" not in d.get("Message", "").lower():
-                return d.get("Message", "No record found")
-        return "Unable to solve captcha"
+        print("payload", payload)
+        r = await session.post(f"{self.HOST}/Data.aspx/FetchIpodetails", json=payload)
+        print("r", r)
+        r.raise_for_status()
+        html = r.json().get("d", "")
+        name = allot = ""
+        if isinstance(html, dict):
+            name = html.get("Name", "")
+            allot = html.get("ALLOTED", html.get("ALLOTED ", ""))
+        else:
+            txt = BeautifulSoup(str(html), "html.parser").get_text(" ", strip=True).upper()
+            parts = txt.split()
+            # crude extraction
+            if "NAME" in parts and "ALLOTED" in parts:
+                try:
+                    name_idx = parts.index("NAME") + 1
+                    allot_idx = parts.index("ALLOTED") + 1
+                    name = parts[name_idx]
+                    allot = parts[allot_idx]
+                except Exception:
+                    pass
+        summary = f"Name: {name} | ALLOTED: {allot}" if name or allot else "No record found"
+        return summary
