@@ -1,7 +1,7 @@
 services:
   - type: web
     name: ipo-telegram-bot
-    env: python
+    runtime: python
     plan: free
     pythonVersion: 3.11.6
     buildCommand: "pip install -r requirements.txt"
