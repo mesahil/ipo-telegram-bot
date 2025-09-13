@@ -3,13 +3,14 @@ services:
     name: ipo-telegram-bot
     runtime: python
     plan: free
-    pythonVersion: "3.11"
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: BOT_TOKEN
         sync: false
       - key: PAN_LIST
         sync: false
       - key: PORT
-        value: 10000
+        value: "10000"
