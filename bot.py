@@ -16,12 +16,16 @@ from settings import Settings
 from registrar_clients import get_client_for_registrar, RegistrarClient
 
 import datetime as _dt
+from datetime import datetime
 # from functools import lru_cache
 
 # Load .env so PAN_LIST is available via os.getenv even outside Settings
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# Store scheduled jobs per user
+scheduled_jobs = {}
 
 
 # BEGIN NEW IMPLEMENTATION ---------------------------------------------
@@ -112,6 +116,196 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
     return catalogue
 
 # END NEW IMPLEMENTATION -----------------------------------------------
+
+
+async def fetch_ipo_market_data() -> List[dict]:
+    """Fetch IPO market data including GMP from InvestorGain API."""
+    import html
+    # Get current month and year
+    now = datetime.now()
+    month = now.month
+    year = now.year
+
+    # Determine financial year (April to March)
+    if month >= 4:
+        fy = f"{year}-{str(year + 1)[2:]}"  # e.g., "2025-26"
+    else:
+        fy = f"{year - 1}-{str(year)[2:]}"  # e.g., "2024-25"
+
+    # Build dynamic URL
+    url = f"https://webnodejs.investorgain.com/cloud/report/data-read/331/1/{month}/{year}/{fy}/0/ipo"
+    logger.info(f"Fetching market data from: {url}")
+
+    async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as session:
+        try:
+            resp = await session.get(url)
+            print("Response:", resp.text)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Extract reportTableData
+            report_data = data.get("reportTableData", [])
+
+            # Process and format the data
+            processed_data = []
+            for item in report_data:
+                # Skip items that don't have listing date or have "-" (not closed)
+                listing = item.get("Listing", "-")
+                if listing == "-":
+                    continue
+
+                # Skip items that are already closed (past listing date)
+                import datetime as dt
+                try:
+                    listing_date = dt.datetime.strptime(item.get("~Str_Listing", ""), "%Y-%m-%d")
+                    if listing_date.date() < dt.datetime.now().date():
+                        continue
+                except:
+                    # If date parsing fails, include the item
+                    pass
+
+                # Extract IPO name
+                name = item.get("~ipo_name", "")
+                if not name:
+                    # Try to extract from Name field if ~ipo_name not available
+                    name_field = item.get("Name", "")
+                    if "title=\"" in name_field:
+                        name = name_field.split('title="')[1].split('"')[0]
+                    else:
+                        name = name_field
+
+                # Extract GMP value from HTML
+                gmp_field = item.get("GMP", "")
+                gmp = "0"
+                gmp_percent = "0%"
+                if "&#8377;" in gmp_field:
+                    # Extract rupee value
+                    if "<b>" in gmp_field:
+                        gmp_raw = gmp_field.split("<b>")[1].split("</b>")[0]
+                        if gmp_raw != "--":
+                            gmp = gmp_raw
+                            # Extract percentage if present
+                            if "(" in gmp_field and "%" in gmp_field:
+                                gmp_percent = gmp_field.split("(")[1].split(")")[0]
+
+                processed_data.append({
+                    "name": html.unescape(name).strip(),
+                    "gmp": f"{gmp} ({gmp_percent})",
+                    "open": item.get("Open", "NA"),
+                    "close": item.get("Close", "NA"),
+                    "boa_date": item.get("BoA Dt", "NA"),
+                    "listing": listing,
+                })
+
+            logger.info(f"Processed {len(processed_data)} IPOs")
+            return processed_data
+        except Exception as e:
+            logger.error(f"Error fetching IPO market data: {e}")
+            logger.error(f"URL was: {url}")
+            return []
+
+
+async def format_and_send_market_data(context, chat_id, market_data):
+    """Format and send market data to a chat."""
+    if not market_data:
+        await context.bot.send_message(chat_id=chat_id, text="Unable to fetch market data at the moment.")
+        return
+
+    # Format the response
+    response_lines = ["📊 *IPO Market Data*\n"]
+
+    for ipo in market_data:
+        lines = [
+            f"\n*{ipo['name']}*",
+            f"📈 GMP: ₹{ipo['gmp']}",
+            f"📅 Open: {ipo['open']}",
+            f"📅 Close: {ipo['close']}",
+            f"📋 Allotment: {ipo['boa_date']}",
+            f"🔔 Listing: {ipo['listing']}",
+            "─" * 20
+        ]
+        response_lines.extend(lines)
+
+    # Send in chunks if message is too long
+    message = "\n".join(response_lines)
+    if len(message) > 4000:
+        # Split into multiple messages
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for line in response_lines:
+            if current_length + len(line) > 3500:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = [line]
+                current_length = len(line)
+            else:
+                current_chunk.append(line)
+                current_length += len(line)
+
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+
+        for chunk in chunks:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+
+
+async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show IPO market data including GMP - one time."""
+    await update.message.reply_text("Fetching market data...")
+    market_data = await fetch_ipo_market_data()
+    await format_and_send_market_data(context, update.effective_chat.id, market_data)
+
+
+async def scheduled_market_update(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback for scheduled market updates."""
+    chat_id = context.job.chat_id
+    market_data = await fetch_ipo_market_data()
+    await format_and_send_market_data(context, chat_id, market_data)
+
+
+async def start_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start daily market updates at 9 AM."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    # Check if already scheduled
+    if user_id in scheduled_jobs:
+        await update.message.reply_text("⚠️ Daily updates are already scheduled for 9:00 AM.")
+        return
+
+    # Schedule daily job at 9:00 AM IST
+    # Note: The bot uses UTC, so 9:00 AM IST = 3:30 AM UTC
+    import pytz
+    from datetime import time
+
+    ist = pytz.timezone('Asia/Kolkata')
+    job = context.job_queue.run_daily(
+        scheduled_market_update,
+        time=time(hour=3, minute=30),  # 3:30 AM UTC = 9:00 AM IST
+        chat_id=chat_id,
+        name=str(user_id)
+    )
+
+    scheduled_jobs[user_id] = job
+    await update.message.reply_text("✅ Daily IPO market updates scheduled for 9:00 AM IST.")
+
+
+async def stop_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop daily market updates."""
+    user_id = update.effective_user.id
+
+    if user_id not in scheduled_jobs:
+        await update.message.reply_text("⚠️ No scheduled updates found.")
+        return
+
+    job = scheduled_jobs[user_id]
+    job.schedule_removal()
+    del scheduled_jobs[user_id]
+
+    await update.message.reply_text("✅ Daily updates have been stopped.")
 
 
 def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
@@ -212,15 +406,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📋 *Available Commands:*
 
+*IPO Allotment:*
 /start - Show IPO list and check allotment status
 /list - Show IPO list (same as /start)
+
+*Market Data:*
+/market - Show IPO market data with GMP (once)
+/start_schedule - Start daily updates at 9 AM IST
+/stop_schedule - Stop daily updates
+
+*Other:*
 /help - Show this help message
 /health - Check if bot is running
 
 *How to use:*
 1. Use /start or /list to see available IPOs
 2. Click on an IPO name to check allotment status
-3. Results will show status for all configured PANs
+3. Use /market for instant GMP updates
+4. Use /start_schedule for automatic daily updates
     """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -230,6 +433,9 @@ async def setup_bot_commands(application: Application) -> None:
     commands = [
         BotCommand("start", "Show IPO list and check allotment status"),
         BotCommand("list", "Show available IPOs"),
+        BotCommand("market", "Show IPO market data with GMP (once)"),
+        BotCommand("start_schedule", "Start daily updates at 9 AM IST"),
+        BotCommand("stop_schedule", "Stop daily updates"),
         BotCommand("help", "Show help message"),
         BotCommand("health", "Check if bot is running"),
     ]
@@ -251,6 +457,9 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))  # legacy alias
     application.add_handler(CommandHandler("list", start))   # new preferred command
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("market", market_command))
+    application.add_handler(CommandHandler("start_schedule", start_schedule))
+    application.add_handler(CommandHandler("stop_schedule", stop_schedule))
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^ipo:"))
 
     # Add a simple health check handler

@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]==20.7
+python-telegram-bot[webhooks,job-queue]==20.7
 httpx==0.25.2
 python-dotenv==1.0.0
 cachetools==5.3.1
@@ -6,3 +6,4 @@ beautifulsoup4==4.12.2
 pydantic==1.10.13
 google-generativeai==0.4.1
 pillow==11.0.0
+pytz==2024.1
