@@ -106,7 +106,7 @@ async def _fetch_closed_ipos(session: httpx.AsyncClient) -> list[dict]:
 async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
     """Fetch latest unique mainboard IPO list from BSE & NSE."""
 
-    async with httpx.AsyncClient(timeout=15, headers=_HEADERS, http2=True) as session:
+    async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as session:
         catalogue = await _fetch_closed_ipos(session)
 
     return catalogue
