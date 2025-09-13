@@ -233,14 +233,15 @@ def main() -> None:
         
         logger.info(f"Starting webhook mode on port {PORT}")
         logger.info(f"Webhook URL: {webhook_url}")
+        logger.info(f"Listening on 0.0.0.0:{PORT}/{settings.BOT_TOKEN}")
         
         # Run webhook with proper parameters
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=settings.BOT_TOKEN,
+            url_path=f"/{settings.BOT_TOKEN}",  # Add leading slash
             webhook_url=webhook_url,
-            drop_pending_updates=True,
+            drop_pending_updates=False,  # Don't drop updates to see if we get any
             allowed_updates=None  # Accept all update types
         )
     else:
