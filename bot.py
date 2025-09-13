@@ -36,7 +36,7 @@ _RTA_MAP = {
     "ipostatus.kfintech": "kfin",
     "bigshareonline": "bigshare",
     "ipo.bigshareonline": "bigshare",
-    "masserv": "mas",
+    "masserv": "mas", #left
 }
 
 _HEADERS = {
