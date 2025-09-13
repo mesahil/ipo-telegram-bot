@@ -11,3 +11,5 @@ services:
         sync: false
       - key: PAN_LIST
         sync: false
+      - key: PORT
+        value: 10000

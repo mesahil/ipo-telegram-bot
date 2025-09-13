@@ -216,7 +216,27 @@ def main() -> None:
     application.add_handler(CommandHandler("list", start))   # new preferred command
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^ipo:"))
 
-    application.run_polling()
+    # Check if running on Render (webhook mode) or locally (polling mode)
+    PORT = int(os.environ.get("PORT", 0))
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+    
+    if RENDER_EXTERNAL_URL and PORT:
+        # Webhook mode for Render deployment
+        webhook_url = f"{RENDER_EXTERNAL_URL}/{settings.BOT_TOKEN}"
+        logger.info(f"Starting webhook mode on port {PORT}")
+        logger.info(f"Webhook URL: {webhook_url}")
+        
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=settings.BOT_TOKEN,
+            webhook_url=webhook_url,
+            drop_pending_updates=True
+        )
+    else:
+        # Polling mode for local development
+        logger.info("Starting polling mode")
+        application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
