@@ -8,7 +8,7 @@ import httpx
 import json
 import re
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import UpdateType
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -207,20 +207,56 @@ async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: 
     return "mufg"
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message with available commands."""
+    help_text = """
+📋 *Available Commands:*
+
+/start - Show IPO list and check allotment status
+/list - Show IPO list (same as /start)
+/help - Show this help message
+/health - Check if bot is running
+
+*How to use:*
+1. Use /start or /list to see available IPOs
+2. Click on an IPO name to check allotment status
+3. Results will show status for all configured PANs
+    """
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def setup_bot_commands(application: Application) -> None:
+    """Set up bot commands for the menu button."""
+    commands = [
+        BotCommand("start", "Show IPO list and check allotment status"),
+        BotCommand("list", "Show available IPOs"),
+        BotCommand("help", "Show help message"),
+        BotCommand("health", "Check if bot is running"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Bot commands have been set up")
+
+
+async def post_init(application: Application) -> None:
+    """Initialize bot commands after startup."""
+    await setup_bot_commands(application)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = Settings()
 
-    application = Application.builder().token(settings.BOT_TOKEN).build()
+    application = Application.builder().token(settings.BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))  # legacy alias
     application.add_handler(CommandHandler("list", start))   # new preferred command
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^ipo:"))
-    
+
     # Add a simple health check handler
     async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Bot is running!")
-    
+
     application.add_handler(CommandHandler("health", health_check))
 
     # Check if running on Render (webhook mode) or locally (polling mode)
