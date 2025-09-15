@@ -27,11 +27,31 @@ class KfinClient(RegistrarClient):
         }
         
         try:
-            # Fetch the JS bundle
+            # Fetch the home page to discover the current JS bundle URL
+            html_resp = await session.get(
+                "https://ipostatus.kfintech.com/",
+                headers=headers,
+                timeout=30,
+            )
+            html_content = html_resp.text
+
+            import re
+
+            # Look for the script tag with the main.*.js bundle
+            script_match = re.search(r'<script[^>]+src="([^"]*main\.[^"]+\.js)"', html_content)
+
+            if not script_match:
+                print("Unable to locate main JS bundle on KFin IPO status page")
+                return []
+
+            js_path = script_match.group(1).lstrip("./")
+            js_url = f"https://ipostatus.kfintech.com/{js_path}"
+
+            # Fetch the JS bundle now that we have its dynamic path
             js_resp = await session.get(
-                "https://ipostatus.kfintech.com/static/js/main.84ccbfb1.js", 
-                headers=headers, 
-                timeout=30
+                js_url,
+                headers=headers,
+                timeout=30,
             )
             js_content = js_resp.text
             
@@ -65,7 +85,6 @@ class KfinClient(RegistrarClient):
         # Get the IPO list
         ipo_list = await self.get_ipo_list(session)
 
-        print("ipo_list ==========================================>", ipo_list)
         
         if not ipo_list:
             return "Unable to fetch IPO list"
