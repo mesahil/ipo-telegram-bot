@@ -434,8 +434,8 @@ async def setup_bot_commands(application: Application) -> None:
         BotCommand("start", "Show IPO list and check allotment status"),
         BotCommand("list", "Show available IPOs"),
         BotCommand("market", "Show IPO market data with GMP (once)"),
-        BotCommand("start_schedule", "Start daily updates at 9 AM IST"),
-        BotCommand("stop_schedule", "Stop daily updates"),
+        # BotCommand("start_schedule", "Start daily updates at 9 AM IST"),
+        # BotCommand("stop_schedule", "Stop daily updates"),
         BotCommand("help", "Show help message"),
         BotCommand("health", "Check if bot is running"),
     ]
