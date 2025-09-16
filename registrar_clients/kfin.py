@@ -16,7 +16,7 @@ class KfinClient(RegistrarClient):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "gzip, deflate",
             "Referer": "https://ipostatus.kfintech.com/",
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "Sec-Ch-Ua-Mobile": "?0",
@@ -35,7 +35,7 @@ class KfinClient(RegistrarClient):
                 timeout=30,
             )
             html_content = html_resp.text
-            print("html_content ==========================================>", html_content)
+            print("html_content ==========================================>",  )
 
             # Look for the script tag with the main.*.js bundle
             script_match = re.search(r'<script[^>]+src="([^"]*main\.[^"]+\.js)"', html_content)
