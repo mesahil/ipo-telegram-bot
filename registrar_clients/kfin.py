@@ -28,21 +28,21 @@ class KfinClient(RegistrarClient):
         
         try:
             # Fetch the home page to discover the current JS bundle URL
+            import re
             html_resp = await session.get(
                 "https://ipostatus.kfintech.com/",
                 headers=headers,
                 timeout=30,
             )
             html_content = html_resp.text
-
-            import re
+            print("html_content ==========================================>", html_content)
 
             # Look for the script tag with the main.*.js bundle
             script_match = re.search(r'<script[^>]+src="([^"]*main\.[^"]+\.js)"', html_content)
 
             if not script_match:
                 print("Unable to locate main JS bundle on KFin IPO status page")
-                return []
+                return html_content
 
             js_path = script_match.group(1).lstrip("./")
             js_url = f"https://ipostatus.kfintech.com/{js_path}"
@@ -89,6 +89,7 @@ class KfinClient(RegistrarClient):
         if not ipo_list:
             return "Unable to fetch IPO list"
         
+        
         # If no IPO code provided, try to match by company name
         if not ipo_code and company_name:
             for ipo in ipo_list:
@@ -102,21 +103,26 @@ class KfinClient(RegistrarClient):
             ipo_names = [f"• {ipo['name']}" for ipo in ipo_list]
             return "Available IPOs:\n" + "\n".join(ipo_names)
 
-        payload = {
-            "pan": pan.upper(),
-            "ipoid": ipo_code or "",  # symbol or code
-            "captcha": "",  # no captcha needed
-            "captchaId": "",
+        # New KFin backend endpoint (AWS API Gateway)
+        api_url = "https://0uz601ms56.execute-api.ap-south-1.amazonaws.com/prod/api/query?type=pan"
+
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "origin": "https://ipostatus.kfintech.com",
+            "referer": "https://ipostatus.kfintech.com/",
+            "client_id": ipo_code or "",
+            "reqparam": pan.upper(),
+            "user-agent": "Mozilla/5.0",  # minimal UA
         }
 
-        # r = await session.post(f"{self.BASE}/GetPanStatus", json=payload)
-        # r.raise_for_status()
-        # data = r.json()
-        # if not data.get("status"):
-        #     return data.get("message", "No record found")
+        r = await session.get(api_url, headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("status"):
+            return data.get("message", "No record found")
 
-        # from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup
 
-        # html = data.get("result") or ""
-        # text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        html = data.get("result") or ""
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
         return "No record found"
