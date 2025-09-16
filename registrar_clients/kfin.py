@@ -92,11 +92,15 @@ class KfinClient(RegistrarClient):
         
         # If no IPO code provided, try to match by company name
         if not ipo_code and company_name:
+            cname_upper = company_name.upper()
             for ipo in ipo_list:
-                if company_name.upper() in ipo['name'].upper():
-                    ipo_code = ipo['clientId']
-                    print(f"Matched: {ipo['name']} (ID: {ipo_code})")
-                    break
+                # Ensure we have a mapping / dict item, otherwise skip
+                if isinstance(ipo, dict):
+                    ipo_name = str(ipo.get("name", "")).upper()
+                    if cname_upper in ipo_name:
+                        ipo_code = str(ipo.get("clientId") or "")
+                        print(f"Matched: {ipo_name} (ID: {ipo_code})", flush=True)
+                        break
         
         if not ipo_code:
             # Return list of available IPOs
