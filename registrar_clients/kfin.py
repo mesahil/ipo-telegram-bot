@@ -122,11 +122,36 @@ class KfinClient(RegistrarClient):
         r = await session.get(api_url, headers=headers, timeout=30)
         r.raise_for_status()
         data = r.json()
-        if not data.get("status"):
-            return data.get("message", "No record found")
+        print("data ==========================================>", data, flush=True)
 
-        from bs4 import BeautifulSoup
+        # New JSON schema – expect list of records under "data"
+        records = data.get("data") if isinstance(data, dict) else None
+        if not records:
+            # Older schema? fall back to previous handling.
+            if not data.get("status"):
+                return data.get("message", "No record found")
 
-        html = data.get("result") or ""
-        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-        return "No record found"
+            html = data.get("result") or ""
+            from bs4 import BeautifulSoup
+
+            parsed = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+            return parsed or "No record found"
+
+        # Build human-readable response from records
+        lines: list[str] = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+
+            name = str(rec.get("Name", "")).title()
+            allotted = rec.get("All_Shares") or rec.get("Allotted_Shares") or ""
+
+            line_parts = [
+                f"Name: {name}",
+                f"Allotted: {allotted}",
+            ]
+
+
+            lines.append(" | ".join(part for part in line_parts if part))
+
+        return "\n\n".join(lines) if lines else "No record found"

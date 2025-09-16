@@ -94,14 +94,14 @@ async def _fetch_closed_ipos(session: httpx.AsyncClient) -> list[dict]:
         result.append({"name": name, "code": symbol, "registrar": registrar})
     
     # TEMP: only show Patel Retail for testing
-    return result
-    # [
-    #     {
-    #         "name": "Vikram Solar",
-    #         "code": "VIKRAMSOLR",
-    #         "registrar": "mufg",
-    #     }
-    # ]
+    # result
+    return [
+        {
+            "name": "DEV ACCELERATOR LIMITED",
+            "code": "DEVX",
+            "registrar": "kfin",
+        }
+    ]
 
 
 
