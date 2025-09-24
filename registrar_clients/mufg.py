@@ -25,7 +25,6 @@ class MufgClient(RegistrarClient):
             cname = node.findtext("companyname", "").upper().strip()
             if cid and cname:
                 mapping[cname] = cid
-        print("MUFG company map size:", len(mapping))
         return mapping
 
     async def status_by_pan(
@@ -35,9 +34,11 @@ class MufgClient(RegistrarClient):
         pan: str,
         ipo_code: str | None = None,
         company_name: str | None = None,
+        confirmed_match: str | None = None,  # New parameter for confirmed fuzzy matches
     ) -> str:  # noqa: D401
         target = (company_name or ipo_code or "").upper()
         cmap = await self._company_map(session)
+        print("target======>:", target)
         print("MUFG company map size:", len(cmap))
 
         def _norm(txt: str) -> str:
@@ -46,13 +47,31 @@ class MufgClient(RegistrarClient):
             )
 
         match = None
-        for name_key, tup in cmap.items():
-            if _norm(target) in _norm(name_key) or _norm(name_key) in _norm(target):
-                match = tup
-                break
+        
+        # If we have a confirmed match from fuzzy matching, use it directly
+        if confirmed_match:
+            confirmed_match_upper = confirmed_match.upper()
+            if confirmed_match_upper in cmap:
+                match = cmap[confirmed_match_upper]
+                print(f"Using confirmed fuzzy match: {confirmed_match} -> {match}")
+            else:
+                # Try to find the confirmed match in the current cmap
+                for name_key, company_id in cmap.items():
+                    if _norm(confirmed_match_upper) == _norm(name_key):
+                        match = company_id
+                        print(f"Found confirmed match via normalization: {name_key} -> {match}")
+                        break
+        else:
+            # Original exact/substring matching logic
+            for name_key, company_id in cmap.items():
+                if _norm(target) in _norm(name_key) or _norm(name_key) in _norm(target):
+                    match = company_id
+                    print(f"Found exact/substring match: {name_key} -> {match}")
+                    break
 
         if not match:
             return "IPO not yet available on MUFG"
+        
         print("MUFG match", match)
         company_id = match
 
@@ -84,3 +103,33 @@ class MufgClient(RegistrarClient):
             data = BeautifulSoup(data, "html.parser").get_text(" ", strip=True)
 
         return data or "No record found"
+
+    async def find_fuzzy_matches(self, session: httpx.AsyncClient, target: str, max_matches: int = 3):
+        """
+        Find fuzzy matches for a target company name.
+        
+        Args:
+            session: HTTP session
+            target: Target company name to match
+            max_matches: Maximum number of fuzzy matches to return
+            
+        Returns:
+            List of FuzzyMatch objects
+        """
+        from fuzzy_matcher import FuzzyMatcher
+        
+        cmap = await self._company_map(session)
+        if not cmap:
+            return []
+        
+        # Create fuzzy matcher
+        matcher = FuzzyMatcher(confidence_threshold=0.5)  # Lower threshold for better recall
+        
+        # Find fuzzy matches
+        matches = matcher.find_best_matches(target, cmap, max_matches=max_matches)
+        
+        print(f"Found {len(matches)} fuzzy matches for '{target}':")
+        for match in matches:
+            print(f"  - {match.match} (confidence: {match.confidence:.2f})")
+        
+        return matches
