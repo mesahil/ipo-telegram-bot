@@ -14,3 +14,6 @@ services:
         sync: false
       - key: PORT
         value: "10000"
+      # Optional: For AWS deployment, set WEBHOOK_URL to your server URL
+      # - key: WEBHOOK_URL
+      #   sync: false

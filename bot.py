@@ -514,18 +514,28 @@ def main() -> None:
 
     application.add_handler(CommandHandler("health", health_check))
 
-    # Check if running on Render (webhook mode) or locally (polling mode)
+    # Check deployment environment for webhook vs polling mode
     PORT = int(os.environ.get("PORT", 0))
-    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-    
-    if RENDER_EXTERNAL_URL and PORT:
-        # Webhook mode for Render deployment
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Custom webhook URL
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render specific
+
+    # Determine webhook URL based on environment
+    if WEBHOOK_URL:
+        # Custom webhook URL provided (e.g., for AWS)
+        webhook_url = f"{WEBHOOK_URL}/{settings.BOT_TOKEN}"
+    elif RENDER_EXTERNAL_URL:
+        # Render deployment
         webhook_url = f"{RENDER_EXTERNAL_URL}/{settings.BOT_TOKEN}"
-        
+    else:
+        # No webhook URL provided, use polling mode
+        webhook_url = None
+
+    if webhook_url and PORT:
+        # Webhook mode for production deployment
         logger.info(f"Starting webhook mode on port {PORT}")
         logger.info(f"Webhook URL: {webhook_url}")
         logger.info(f"Listening on 0.0.0.0:{PORT}/{settings.BOT_TOKEN}")
-        
+
         # Run webhook with proper parameters
         application.run_webhook(
             listen="0.0.0.0",
