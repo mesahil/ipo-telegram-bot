@@ -120,20 +120,8 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
 
 async def fetch_ipo_market_data() -> List[dict]:
     """Fetch IPO market data including GMP from InvestorGain API."""
-    import html
-    # Get current month and year
-    now = datetime.now()
-    month = now.month
-    year = now.year
-
-    # Determine financial year (April to March)
-    if month >= 4:
-        fy = f"{year}-{str(year + 1)[2:]}"  # e.g., "2025-26"
-    else:
-        fy = f"{year - 1}-{str(year)[2:]}"  # e.g., "2024-25"
-
     # Build dynamic URL
-    url = f"https://webnodejs.investorgain.com/cloud/report/data-read/331/1/{month}/{year}/{fy}/0/ipo"
+    url = "https://webnodejs.investorgain.com/cloud/v2/index/gmp-price-read"
     logger.info(f"Fetching market data from: {url}")
 
     async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as session:
@@ -143,58 +131,27 @@ async def fetch_ipo_market_data() -> List[dict]:
             resp.raise_for_status()
             data = resp.json()
 
-            # Extract reportTableData
-            report_data = data.get("reportTableData", [])
+            # Extract gmpList
+            gmp_list = data.get("gmpList", [])
 
             # Process and format the data
             processed_data = []
-            for item in report_data:
-                # Skip items that don't have listing date or have "-" (not closed)
-                listing = item.get("Listing", "-")
-                if listing == "-":
+            for item in gmp_list:
+                name = item.get("company_short_name", "").strip()
+                if not name:
                     continue
 
-                # Skip items that are already closed (past listing date)
-                import datetime as dt
-                try:
-                    listing_date = dt.datetime.strptime(item.get("~Str_Listing", ""), "%Y-%m-%d")
-                    if listing_date.date() < dt.datetime.now().date():
-                        continue
-                except:
-                    # If date parsing fails, include the item
-                    pass
-
-                # Extract IPO name
-                name = item.get("~ipo_name", "")
-                if not name:
-                    # Try to extract from Name field if ~ipo_name not available
-                    name_field = item.get("Name", "")
-                    if "title=\"" in name_field:
-                        name = name_field.split('title="')[1].split('"')[0]
-                    else:
-                        name = name_field
-
-                # Extract GMP value from HTML
-                gmp_field = item.get("GMP", "")
-                gmp = "0"
-                gmp_percent = "0%"
-                if "&#8377;" in gmp_field:
-                    # Extract rupee value
-                    if "<b>" in gmp_field:
-                        gmp_raw = gmp_field.split("<b>")[1].split("</b>")[0]
-                        if gmp_raw != "--":
-                            gmp = gmp_raw
-                            # Extract percentage if present
-                            if "(" in gmp_field and "%" in gmp_field:
-                                gmp_percent = gmp_field.split("(")[1].split(")")[0]
+                gmp_val = item.get("gmp", "0")
+                gmp_perc = item.get("gmp_perc", "0")
+                gmp_display = f"{gmp_val} ({gmp_perc}%)"
 
                 processed_data.append({
-                    "name": html.unescape(name).strip(),
-                    "gmp": f"{gmp} ({gmp_percent})",
-                    "open": item.get("Open", "NA"),
-                    "close": item.get("Close", "NA"),
-                    "boa_date": item.get("BoA Dt", "NA"),
-                    "listing": listing,
+                    "name": name,
+                    "gmp": gmp_display,
+                    "open": "NA",
+                    "close": "NA",
+                    "boa_date": "NA",
+                    "listing": "NA",
                 })
 
             logger.info(f"Processed {len(processed_data)} IPOs")
@@ -478,6 +435,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setup_bot_commands(application: Application) -> None:
     """Set up bot commands for the menu button."""
     commands = [
+        BotCommand("menu", "--- BOT MENU ---"),
         BotCommand("health", "Check if bot is running"),
         BotCommand("closed_ipo", "Show closed IPOs and check allotment status"),
         BotCommand("all_active_ipo", "Show all active IPOs with GMP data"),
@@ -500,6 +458,7 @@ def main() -> None:
 
     application = Application.builder().token(settings.BOT_TOKEN).post_init(post_init).build()
 
+    application.add_handler(CommandHandler("menu", help_command))
     application.add_handler(CommandHandler("start", start))  # legacy alias
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("closed_ipo", start))  # legacy alias
