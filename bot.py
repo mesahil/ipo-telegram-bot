@@ -154,18 +154,6 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
 
 async def fetch_ipo_market_data() -> List[dict]:
     """Fetch IPO market data including GMP from InvestorGain API."""
-    import html
-    # Get current month and year
-    now = datetime.now()
-    month = now.month
-    year = now.year
-
-    # Determine financial year (April to March)
-    if month >= 4:
-        fy = f"{year}-{str(year + 1)[2:]}"  # e.g., "2025-26"
-    else:
-        fy = f"{year - 1}-{str(year)[2:]}"  # e.g., "2024-25"
-
     # Build dynamic URL
     url = f"https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/{month}/{year}/{fy}/0/ipo?search=&v=21-18"
     logger.info(f"Fetching market data from: {url}")
@@ -177,15 +165,14 @@ async def fetch_ipo_market_data() -> List[dict]:
             resp.raise_for_status()
             data = resp.json()
 
-            # Extract reportTableData
-            report_data = data.get("reportTableData", [])
+            # Extract gmpList
+            gmp_list = data.get("gmpList", [])
 
             # Process and format the data
             processed_data = []
-            for item in report_data:
-                # Skip items that don't have listing date or have "-" (not closed)
-                listing = item.get("Listing", "-")
-                if listing == "-":
+            for item in gmp_list:
+                name = item.get("company_short_name", "").strip()
+                if not name:
                     continue
 
                 # Skip items that are already closed (past listing date)
@@ -653,6 +640,7 @@ def main() -> None:
 
     application = Application.builder().token(settings.BOT_TOKEN).post_init(post_init).build()
 
+    application.add_handler(CommandHandler("menu", help_command))
     application.add_handler(CommandHandler("start", start))  # legacy alias
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("closed_ipo", start))  # legacy alias
