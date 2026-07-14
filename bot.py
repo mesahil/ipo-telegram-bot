@@ -177,13 +177,24 @@ async def fetch_ipo_market_data() -> List[dict]:
             resp.raise_for_status()
             data = resp.json()
 
-            # Extract gmpList
-            gmp_list = data.get("gmpList", [])
+            # Extract reportTableData
+            gmp_list = data.get("reportTableData", [])
 
             # Process and format the data
             processed_data = []
             for item in gmp_list:
-                name = item.get("company_short_name", "").strip()
+                # Extract IPO name
+                name = item.get("~ipo_name", "").strip()
+                if not name:
+                    name_field = item.get("Name", "")
+                    if "title=\"" in name_field:
+                        name = name_field.split('title="')[1].split('"')[0].strip()
+                    else:
+                        name = name_field.strip()
+
+                if not name:
+                    name = item.get("company_short_name", "").strip()
+
                 if not name:
                     continue
 
@@ -196,16 +207,6 @@ async def fetch_ipo_market_data() -> List[dict]:
                 except:
                     # If date parsing fails, include the item
                     pass
-
-                # Extract IPO name
-                name = item.get("~ipo_name", "")
-                if not name:
-                    # Try to extract from Name field if ~ipo_name not available
-                    name_field = item.get("Name", "")
-                    if "title=\"" in name_field:
-                        name = name_field.split('title="')[1].split('"')[0]
-                    else:
-                        name = name_field
 
                 # Extract GMP value from HTML
                 gmp_field = item.get("GMP", "")
