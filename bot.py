@@ -7,6 +7,7 @@ from typing import List, Optional
 import httpx
 import json
 import re
+import tornado.web
 from bs4 import BeautifulSoup
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import UpdateType
@@ -24,8 +25,41 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Store scheduled jobs per user
-scheduled_jobs = {}
+SUBSCRIBERS_FILE = "subscribers.json"
+
+def get_subscribers() -> list:
+    if not os.path.exists(SUBSCRIBERS_FILE):
+        return []
+    try:
+        with open(SUBSCRIBERS_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading subscribers file: {e}")
+        return []
+
+def add_subscriber(chat_id: int) -> bool:
+    subs = get_subscribers()
+    if chat_id not in subs:
+        subs.append(chat_id)
+        try:
+            with open(SUBSCRIBERS_FILE, "w") as f:
+                json.dump(subs, f)
+            return True
+        except Exception as e:
+            logger.error(f"Error writing subscriber: {e}")
+    return False
+
+def remove_subscriber(chat_id: int) -> bool:
+    subs = get_subscribers()
+    if chat_id in subs:
+        subs.remove(chat_id)
+        try:
+            with open(SUBSCRIBERS_FILE, "w") as f:
+                json.dump(subs, f)
+            return True
+        except Exception as e:
+            logger.error(f"Error removing subscriber: {e}")
+    return False
 
 
 # BEGIN NEW IMPLEMENTATION ---------------------------------------------
@@ -121,7 +155,7 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
 async def fetch_ipo_market_data() -> List[dict]:
     """Fetch IPO market data including GMP from InvestorGain API."""
     # Build dynamic URL
-    url = "https://webnodejs.investorgain.com/cloud/v2/index/gmp-price-read"
+    url = f"https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/{month}/{year}/{fy}/0/ipo?search=&v=21-18"
     logger.info(f"Fetching market data from: {url}")
 
     async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as session:
@@ -141,17 +175,52 @@ async def fetch_ipo_market_data() -> List[dict]:
                 if not name:
                     continue
 
-                gmp_val = item.get("gmp", "0")
-                gmp_perc = item.get("gmp_perc", "0")
-                gmp_display = f"{gmp_val} ({gmp_perc}%)"
+                # Skip items that are already closed (past listing date)
+                import datetime as dt
+                try:
+                    listing_date = dt.datetime.strptime(item.get("~Str_Listing", ""), "%Y-%m-%d")
+                    if listing_date.date() < dt.datetime.now().date():
+                        continue
+                except:
+                    # If date parsing fails, include the item
+                    pass
+
+                # Extract IPO name
+                name = item.get("~ipo_name", "")
+                if not name:
+                    # Try to extract from Name field if ~ipo_name not available
+                    name_field = item.get("Name", "")
+                    if "title=\"" in name_field:
+                        name = name_field.split('title="')[1].split('"')[0]
+                    else:
+                        name = name_field
+
+                # Extract GMP value from HTML
+                gmp_field = item.get("GMP", "")
+                gmp = "0"
+                gmp_percent = "0%"
+                if "&#8377;" in gmp_field:
+                    # Extract rupee value
+                    if "<b>" in gmp_field:
+                        gmp_raw = gmp_field.split("<b>")[1].split("</b>")[0]
+                        if gmp_raw != "--":
+                            gmp = gmp_raw
+                            # Extract percentage if present
+                            if "(" in gmp_field and "%" in gmp_field:
+                                gmp_percent = gmp_field.split("(")[1].split(")")[0]
+
+                def clean_val(val):
+                    if not val:
+                        return "NA"
+                    return val.split("<")[0].strip()
 
                 processed_data.append({
-                    "name": name,
-                    "gmp": gmp_display,
-                    "open": "NA",
-                    "close": "NA",
-                    "boa_date": "NA",
-                    "listing": "NA",
+                    "name": html.unescape(name).strip(),
+                    "gmp": f"{gmp} ({gmp_percent})",
+                    "open": clean_val(item.get("Open", "NA")),
+                    "close": clean_val(item.get("Close", "NA")),
+                    "boa_date": clean_val(item.get("BoA Dt", "NA")),
+                    "listing": clean_val(listing),
                 })
 
             logger.info(f"Processed {len(processed_data)} IPOs")
@@ -409,6 +478,76 @@ async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: 
     return "mufg"
 
 
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Subscribe user to daily updates."""
+    chat_id = update.effective_chat.id
+    added = add_subscriber(chat_id)
+    if added:
+        await update.message.reply_text(
+            "🔔 *Subscribed!*\n\nYou will now receive daily IPO market updates every morning at 9:00 AM.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ You are already subscribed to daily updates.",
+            parse_mode="Markdown"
+        )
+
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unsubscribe user from daily updates."""
+    chat_id = update.effective_chat.id
+    removed = remove_subscriber(chat_id)
+    if removed:
+        await update.message.reply_text(
+            "🔕 *Unsubscribed!*\n\nYou will no longer receive daily IPO market updates.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ You were not subscribed to daily updates.",
+            parse_mode="Markdown"
+        )
+
+
+async def send_daily_updates(application: Application) -> None:
+    """Broadcast daily IPO updates to all subscribers."""
+    logger.info("Triggering daily IPO updates for subscribers...")
+    market_data = await fetch_ipo_market_data()
+    if not market_data:
+        logger.warning("No market data fetched for daily updates.")
+        return
+
+    # Format the message
+    response_lines = ["📊 *Daily IPO Market Data Update*\n"]
+    for ipo in market_data:
+        lines = [
+            f"\n*{ipo['name']}*",
+            f"📈 GMP: ₹{ipo['gmp']}",
+            f"📅 Open: {ipo['open']}",
+            f"📅 Close: {ipo['close']}",
+            f"📋 Allotment: {ipo['boa_date']}",
+            f"🔔 Listing: {ipo['listing']}",
+            "────────────────────"
+        ]
+        response_lines.extend(lines)
+
+    message_text = "\n".join(response_lines)
+    
+    subs = get_subscribers()
+    logger.info(f"Sending daily update to {len(subs)} subscribers.")
+    for chat_id in subs:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode="Markdown"
+            )
+            await asyncio.sleep(0.05)  # Avoid hitting rate limits
+        except Exception as e:
+            logger.error(f"Failed to send daily update to {chat_id}: {e}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help message with available commands."""
     help_text = """
@@ -417,7 +556,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *IPO Services:*
 /closed_ipo - Show closed IPOs and check allotment status
 /all_active_ipo - Show all active IPOs with GMP data
-
+/subscribe - Subscribe to daily updates at 9:00 AM IST
+/unsubscribe - Unsubscribe from daily updates
 
 *Other:*
 /health - Check if bot is running
@@ -427,7 +567,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. Use /closed_ipo to see closed IPOs and check allotment status
 2. Click on an IPO name to check your allotment status
 3. Use /all_active_ipo to see active IPOs with GMP data
-4. Legacy commands /list and /market still work
+4. Use /subscribe to receive automated updates every morning
+5. Legacy commands /list and /market still work
     """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -435,21 +576,62 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setup_bot_commands(application: Application) -> None:
     """Set up bot commands for the menu button."""
     commands = [
-        BotCommand("menu", "--- BOT MENU ---"),
+        BotCommand("help", "Show help message and instructions"),
         BotCommand("health", "Check if bot is running"),
         BotCommand("closed_ipo", "Show closed IPOs and check allotment status"),
         BotCommand("all_active_ipo", "Show all active IPOs with GMP data"),
-        # BotCommand("start_schedule", "Start daily updates at 9 AM IST"),
-        # BotCommand("stop_schedule", "Stop daily updates"),
-        # BotCommand("help", "Show help message"),
+        BotCommand("subscribe", "Subscribe to daily morning updates"),
+        BotCommand("unsubscribe", "Unsubscribe from daily updates"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Bot commands have been set up")
 
 
 async def post_init(application: Application) -> None:
-    """Initialize bot commands after startup."""
+    """Initialize bot commands after startup and start Tornado HTTP server."""
     await setup_bot_commands(application)
+
+    PORT = int(os.environ.get("PORT", 8000))
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+    # Access Settings to get BOT_TOKEN
+    settings = Settings()
+
+    class CronHandler(tornado.web.RequestHandler):
+        async def get(self):
+            # Run broadcast in background so HTTP response is returned immediately
+            asyncio.create_task(send_daily_updates(application))
+            self.write("Daily updates triggered successfully.")
+
+    class HealthHandler(tornado.web.RequestHandler):
+        def get(self):
+            self.write("OK")
+
+    handlers = [
+        (r"/health", HealthHandler),
+        (r"/cron-daily-update", CronHandler),
+    ]
+
+    # In Webhook mode, Tornado also handles incoming Telegram webhook updates
+    if RENDER_EXTERNAL_URL:
+        class TelegramWebhookHandler(tornado.web.RequestHandler):
+            async def post(self):
+                try:
+                    data = json.loads(self.request.body)
+                    update = Update.de_json(data, application.bot)
+                    await application.process_update(update)
+                    self.write("OK")
+                except Exception as e:
+                    logger.error(f"Error handling Telegram webhook update: {e}")
+                    self.set_status(500)
+                    self.write("Error")
+
+        handlers.append((f"/{settings.BOT_TOKEN}", TelegramWebhookHandler))
+        logger.info(f"Registered webhook endpoint: /{settings.BOT_TOKEN}")
+
+    app = tornado.web.Application(handlers)
+    app.listen(PORT, address="0.0.0.0")
+    logger.info(f"Tornado HTTP server listening on 0.0.0.0:{PORT}")
 
 
 def main() -> None:
@@ -463,8 +645,8 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("closed_ipo", start))  # legacy alias
     application.add_handler(CommandHandler("all_active_ipo", market_command))  # new command for active IPOs
-    # application.add_handler(CommandHandler("start_schedule", start_schedule))
-    # application.add_handler(CommandHandler("stop_schedule", stop_schedule))
+    application.add_handler(CommandHandler("subscribe", subscribe_command))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_)"))
 
     # Add a simple health check handler
@@ -476,24 +658,20 @@ def main() -> None:
     # Check if running on Render (webhook mode) or locally (polling mode)
     PORT = int(os.environ.get("PORT", 0))
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-    
+
     if RENDER_EXTERNAL_URL and PORT:
-        # Webhook mode for Render deployment
+        # Webhook mode for Render deployment (Tornado handles the web server, so we just start the app)
         webhook_url = f"{RENDER_EXTERNAL_URL}/{settings.BOT_TOKEN}"
-        
-        logger.info(f"Starting webhook mode on port {PORT}")
-        logger.info(f"Webhook URL: {webhook_url}")
-        logger.info(f"Listening on 0.0.0.0:{PORT}/{settings.BOT_TOKEN}")
-        
-        # Run webhook with proper parameters
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=f"/{settings.BOT_TOKEN}",  # Add leading slash
-            webhook_url=webhook_url,
-            drop_pending_updates=False,  # Don't drop updates to see if we get any
-            allowed_updates=None  # Accept all update types
-        )
+        logger.info(f"Starting in Webhook mode. Webhook URL: {webhook_url}")
+
+        async def run_webhook_mode():
+            await application.initialize()
+            await application.start()
+            await application.bot.set_webhook(url=webhook_url)
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_webhook_mode())
+        loop.run_forever()
     else:
         # Polling mode for local development
         logger.info("Starting polling mode")
