@@ -154,6 +154,18 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
 
 async def fetch_ipo_market_data() -> List[dict]:
     """Fetch IPO market data including GMP from InvestorGain API."""
+    import html
+    # Get current month and year
+    now = datetime.now()
+    month = now.month
+    year = now.year
+
+    # Determine financial year (April to March)
+    if month >= 4:
+        fy = f"{year}-{str(year + 1)[2:]}"  # e.g., "2025-26"
+    else:
+        fy = f"{year - 1}-{str(year)[2:]}"  # e.g., "2024-25"
+
     # Build dynamic URL
     url = f"https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/{month}/{year}/{fy}/0/ipo?search=&v=21-18"
     logger.info(f"Fetching market data from: {url}")
@@ -213,6 +225,8 @@ async def fetch_ipo_market_data() -> List[dict]:
                     if not val:
                         return "NA"
                     return val.split("<")[0].strip()
+
+                listing = item.get("Listing", "-")
 
                 processed_data.append({
                     "name": html.unescape(name).strip(),
@@ -666,12 +680,20 @@ def main() -> None:
 
         async def run_webhook_mode():
             await application.initialize()
+            await post_init(application)
             await application.start()
-            await application.bot.set_webhook(url=webhook_url)
+            try:
+                await application.bot.set_webhook(url=webhook_url)
+            except Exception as e:
+                logger.warning(f"Could not set Telegram webhook (expected for local HTTP): {e}")
+            # Keep the event loop running
+            while True:
+                await asyncio.sleep(3600)
 
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(run_webhook_mode())
-        loop.run_forever()
+        try:
+            asyncio.run(run_webhook_mode())
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Application stopped.")
     else:
         # Polling mode for local development
         logger.info("Starting polling mode")
