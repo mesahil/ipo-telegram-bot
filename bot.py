@@ -407,41 +407,35 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             test_result = await client.status_by_pan(session, pan=pans[0], company_name=ipo_name)
             
-            # Check if we got "not available" response and client supports fuzzy matching
-            if ("not yet available" in test_result.lower() or "not available" in test_result.lower()) and hasattr(client, 'find_fuzzy_matches'):
-                # Try fuzzy matching
-                fuzzy_matches = await client.find_fuzzy_matches(session, ipo_name)
+            is_not_found = any(k in test_result.lower() for k in ["not available", "not yet available", "not found", "unable to fetch"])
+            if is_not_found:
+                if hasattr(client, 'find_fuzzy_matches'):
+                    fuzzy_matches = await client.find_fuzzy_matches(session, ipo_name)
+                    if fuzzy_matches:
+                        from confirmation_handler import confirmation_handler
+                        context.user_data['fuzzy_pans'] = pans
+                        context.user_data['fuzzy_registrar'] = registrar
+                        await confirmation_handler.request_confirmation(
+                            update, context, ipo_name, fuzzy_matches, registrar, pans[0]
+                        )
+                        return
                 
-                if fuzzy_matches:
-                    # Request user confirmation for fuzzy matches
-                    from confirmation_handler import confirmation_handler
-                    
-                    # Store PAN list in context for later use
-                    context.user_data['fuzzy_pans'] = pans
-                    context.user_data['fuzzy_registrar'] = registrar
-                    
-                    await confirmation_handler.request_confirmation(
-                        update, context, ipo_name, fuzzy_matches, registrar, pans[0]
-                    )
-                    return
+                await query.edit_message_text(f"❌ '{ipo_name}' is not available on {registrar.upper()}.")
+                return
         except Exception as e:
-            # If there's an error with the test, try fuzzy matching as fallback
             if hasattr(client, 'find_fuzzy_matches'):
                 try:
                     fuzzy_matches = await client.find_fuzzy_matches(session, ipo_name)
-                    
                     if fuzzy_matches:
                         from confirmation_handler import confirmation_handler
-                        
                         context.user_data['fuzzy_pans'] = pans
                         context.user_data['fuzzy_registrar'] = registrar
-                        
                         await confirmation_handler.request_confirmation(
                             update, context, ipo_name, fuzzy_matches, registrar, pans[0]
                         )
                         return
                 except Exception:
-                    pass  # Continue to normal processing
+                    pass
         
         # Normal processing for all PANs (either company found or fuzzy not available/not needed)
         tasks = [client.status_by_pan(session, pan=pan, company_name=ipo_name) for pan in pans]
@@ -451,13 +445,41 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     lines = [f"\n*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"]
     for pan, result in zip(pans, results):
         if isinstance(result, Exception):
-            logger.exception("Error fetching status", exc_info=result)
+            logger.error("[ERROR] Exception fetching status for PAN %s: %s", pan, result)
             lines.append(f"{pan}  –  error fetching status")
         else:
             lines.append(f"{pan}  –  {result}")
 
-    text = "\n".join(lines)
-    await query.edit_message_text(text=text)
+    full_text = "\n".join(lines)
+    logger.info("[ACTION] Completed allotment check for '%s' | PAN count: %d | Total response length: %d chars", ipo_name, len(pans), len(full_text))
+
+    # Telegram message length limit is 4096. Chunk into segments of <= 4000 chars.
+    MAX_LEN = 3800
+    chunks = []
+    current_chunk = ""
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > MAX_LEN:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = line
+        else:
+            current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    if chunks:
+        # Edit initial callback message with first chunk
+        try:
+            await query.edit_message_text(text=chunks[0], parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(text=chunks[0])
+
+        # Send remaining chunks as new messages
+        for chunk in chunks[1:]:
+            try:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=chunk, parse_mode="Markdown")
+            except Exception:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=chunk)
 
 
 async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: str, start_dt: str) -> str:
@@ -466,21 +488,21 @@ async def _resolve_registrar(session: httpx.AsyncClient, scrip_cd: str, ipo_no: 
         "https://www.bseindia.com/markets/publicIssues/DisplayIPO.aspx"
         f"?id={scrip_cd}&type=IPO&idtype=1&status=L&IPONo={ipo_no}&startdt={start_dt}"
     )
-    # print("IPO detail URL:", url)
+    logger.info("[REQUEST] GET %s (Resolving registrar from BSE)", url)
+    reg_full = ""
     try:
         page = await session.get(url, headers=_HEADERS, timeout=10)
         page.raise_for_status()
+        logger.info("[RESPONSE] GET BSE page | Status: %s", page.status_code)
         soup = BeautifulSoup(page.text, "html.parser")
         label = soup.find(string=re.compile(r"Registrar", re.I))
-        reg_full = ""
         if label:
             link = label.find_next("a")
             if link:
                 reg_full = link.get_text(strip=True).upper()
-    except Exception:
-        reg_full = ""
-
-    # print("Registrar full:", reg_full)
+        logger.info("[EXTRACT] BSE Registrar string: '%s'", reg_full)
+    except Exception as exc:
+        logger.error("[ERROR] Failed resolving registrar from BSE: %s", exc)
 
     if "INTIME" in reg_full or "MUFG" in reg_full or "LINK" in reg_full:
         return "mufg"
@@ -650,7 +672,10 @@ async def post_init(application: Application) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        level=logging.INFO
+    )
     settings = Settings()
 
     application = Application.builder().token(settings.BOT_TOKEN).post_init(post_init).build()

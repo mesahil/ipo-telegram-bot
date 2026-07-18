@@ -79,24 +79,27 @@ class ConfirmationHandler:
         
         # Create message text
         message_lines = [
-            f"🔍 *Fuzzy Match Found*",
+            f"🔍 *Exact Match Not Found*",
             f"",
-            f"**Target:** {target}",
+            f"**Requested:** {target}",
             f"**Registrar:** {registrar.upper()}",
             f"",
-            f"**Found {len(matches)} potential match(es):**"
+            f"Select an available IPO on {registrar.upper()}:"
         ]
         
         # Create inline keyboard with match options
         keyboard = []
         for i, match in enumerate(matches):
-            confidence_percent = int(match.confidence * 100)
-            button_text = f"✅ {match.match} ({confidence_percent}%)"
+            if match.confidence > 0:
+                confidence_percent = int(match.confidence * 100)
+                button_text = f"✅ {match.match} ({confidence_percent}%)"
+            else:
+                button_text = f"• {match.match}"
             callback_data = f"fuzz_confirm:{confirmation_id}:{i}"
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
         # Add cancel option
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"fuzz_cancel:{confirmation_id}")])
+        keyboard.append([InlineKeyboardButton("❌ None of these", callback_data=f"fuzz_cancel:{confirmation_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
