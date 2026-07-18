@@ -736,10 +736,10 @@ def main() -> None:
 
     # Check if running on Render (webhook mode) or locally (polling mode)
     PORT = int(os.environ.get("PORT", 0))
-    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+    RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL") or (f"https://{RENDER_EXTERNAL_HOSTNAME}" if RENDER_EXTERNAL_HOSTNAME else None)
 
     if RENDER_EXTERNAL_URL and PORT:
-        # Webhook mode for Render deployment (Tornado handles the web server, so we just start the app)
         webhook_url = f"{RENDER_EXTERNAL_URL}/{settings.BOT_TOKEN}"
         logger.info(f"Starting in Webhook mode. Webhook URL: {webhook_url}")
 
@@ -749,9 +749,9 @@ def main() -> None:
             await application.start()
             try:
                 await application.bot.set_webhook(url=webhook_url)
+                logger.info(f"Telegram webhook successfully set to: {webhook_url}")
             except Exception as e:
-                logger.warning(f"Could not set Telegram webhook (expected for local HTTP): {e}")
-            # Keep the event loop running
+                logger.warning(f"Could not set Telegram webhook: {e}")
             while True:
                 await asyncio.sleep(3600)
 
@@ -759,8 +759,21 @@ def main() -> None:
             asyncio.run(run_webhook_mode())
         except (KeyboardInterrupt, SystemExit):
             logger.info("Application stopped.")
+    elif PORT:
+        logger.info(f"Starting in Polling + Web Server mode on port {PORT}")
+        async def run_polling_with_web():
+            await application.initialize()
+            await post_init(application)
+            await application.start()
+            await application.updater.start_polling(drop_pending_updates=True)
+            while True:
+                await asyncio.sleep(3600)
+
+        try:
+            asyncio.run(run_polling_with_web())
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Application stopped.")
     else:
-        # Polling mode for local development
         logger.info("Starting polling mode")
         application.run_polling(drop_pending_updates=True)
 
