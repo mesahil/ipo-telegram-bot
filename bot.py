@@ -25,9 +25,30 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")
+JSONBIN_BIN_ID = os.getenv("JSONBIN_BIN_ID")
 SUBSCRIBERS_FILE = "subscribers.json"
 
 def get_subscribers() -> list:
+    if JSONBIN_API_KEY and JSONBIN_BIN_ID:
+        try:
+            url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
+            headers = {"X-Master-Key": JSONBIN_API_KEY}
+            resp = httpx.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                record = data.get("record", [])
+                if isinstance(record, list):
+                    logger.info(f"[JSONBIN] Loaded {len(record)} subscriber(s) from Jsonbin.io")
+                    try:
+                        with open(SUBSCRIBERS_FILE, "w") as f:
+                            json.dump(record, f)
+                    except Exception:
+                        pass
+                    return record
+        except Exception as e:
+            logger.error(f"[JSONBIN ERROR] Failed reading subscribers from Jsonbin.io: {e}")
+
     if not os.path.exists(SUBSCRIBERS_FILE):
         return []
     try:
@@ -37,28 +58,46 @@ def get_subscribers() -> list:
         logger.error(f"Error reading subscribers file: {e}")
         return []
 
+def _save_subscribers(subs: list) -> bool:
+    success = False
+    if JSONBIN_API_KEY and JSONBIN_BIN_ID:
+        try:
+            url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
+            headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": JSONBIN_API_KEY
+            }
+            resp = httpx.put(url, headers=headers, json=subs, timeout=10)
+            if resp.status_code in (200, 201):
+                logger.info(f"[JSONBIN] Saved {len(subs)} subscriber(s) to Jsonbin.io")
+                success = True
+            else:
+                logger.error(f"[JSONBIN ERROR] Status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            logger.error(f"[JSONBIN ERROR] Failed saving subscribers to Jsonbin.io: {e}")
+
+    try:
+        with open(SUBSCRIBERS_FILE, "w") as f:
+            json.dump(subs, f)
+        if not (JSONBIN_API_KEY and JSONBIN_BIN_ID):
+            success = True
+    except Exception as e:
+        logger.error(f"Error writing local subscribers file: {e}")
+
+    return success
+
 def add_subscriber(chat_id: int) -> bool:
     subs = get_subscribers()
     if chat_id not in subs:
         subs.append(chat_id)
-        try:
-            with open(SUBSCRIBERS_FILE, "w") as f:
-                json.dump(subs, f)
-            return True
-        except Exception as e:
-            logger.error(f"Error writing subscriber: {e}")
+        return _save_subscribers(subs)
     return False
 
 def remove_subscriber(chat_id: int) -> bool:
     subs = get_subscribers()
     if chat_id in subs:
         subs.remove(chat_id)
-        try:
-            with open(SUBSCRIBERS_FILE, "w") as f:
-                json.dump(subs, f)
-            return True
-        except Exception as e:
-            logger.error(f"Error removing subscriber: {e}")
+        return _save_subscribers(subs)
     return False
 
 
