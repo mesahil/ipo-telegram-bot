@@ -4,7 +4,10 @@ import httpx
 
 from . import RegistrarClient
 
+import logging
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 class BigshareClient(RegistrarClient):
@@ -14,11 +17,15 @@ class BigshareClient(RegistrarClient):
 
     async def _company_map(self, session: httpx.AsyncClient) -> dict[str, str]:
         """Scrape dropdown to build COMPANY_NAME -> code map."""
-        page = await session.get(f"{self.HOST}/ipo_status.html")
+        url = f"{self.HOST}/ipo_status.html"
+        logger.info("[REQUEST] GET %s", url)
+        page = await session.get(url)
         page.raise_for_status()
+        logger.info("[RESPONSE] GET %s | Status: %s | Length: %d bytes", url, page.status_code, len(page.text))
         soup = BeautifulSoup(page.text, "html.parser")
         sel = soup.find("select", id="ddlCompany")
         if not sel:
+            logger.warning("[WARNING] Could not find dropdown ddlCompany on Bigshare page")
             return {}
         mapping: dict[str, str] = {}
         for opt in sel.find_all("option"):
@@ -26,6 +33,7 @@ class BigshareClient(RegistrarClient):
             name = opt.text.strip().upper()
             if code and name:
                 mapping[name] = code
+        logger.info("[SUCCESS] Bigshare company map loaded: %d companies", len(mapping))
         return mapping
 
     async def status_by_pan(
@@ -35,59 +43,51 @@ class BigshareClient(RegistrarClient):
         pan: str,
         ipo_code: str | None = None,
         company_name: str | None = None,
-        confirmed_match: str | None = None,  # New parameter for confirmed fuzzy matches
-    ) -> str:  # noqa: D401
-        # Prefer company_name if provided; else fallback to ipo_code
+        confirmed_match: str | None = None,
+    ) -> str:
         target_name = (company_name or ipo_code or "").strip()
         cmap = await self._company_map(session)
-        print("cmap", cmap)
         
         def _normalize(txt: str) -> str:
-            """Normalize company name for better matching."""
             return " ".join(
                 txt.replace("LIMITED", "").replace("LTD", "").replace("&", "AND").split()
             )
         
         company_code = None
         
-        # If we have a confirmed match from fuzzy matching, use it directly
         if confirmed_match:
             confirmed_match_upper = confirmed_match.upper()
             if confirmed_match_upper in cmap:
                 company_code = cmap[confirmed_match_upper]
-                print(f"Using confirmed fuzzy match: {confirmed_match} -> {company_code}")
+                logger.info("[MATCH] Bigshare matched confirmed fuzzy match '%s' -> Code: %s", confirmed_match, company_code)
             else:
-                # Try to find the confirmed match in the current cmap
                 for name_key, code_val in cmap.items():
                     if _normalize(confirmed_match_upper) == _normalize(name_key):
                         company_code = code_val
-                        print(f"Found confirmed match via normalization: {name_key} -> {company_code}")
+                        logger.info("[MATCH] Bigshare normalized fuzzy match '%s' -> Code: %s", name_key, company_code)
                         break
         else:
-            # First try exact match on uppercase name
             key = target_name.upper()
-            print("key", key)
             company_code = cmap.get(key)
-            print("company_code after exact match", company_code)
-            
-            if not company_code:
-                # Try normalized matching for common variations like & vs AND
+            if company_code:
+                logger.info("[MATCH] Bigshare exact match '%s' -> Code: %s", key, company_code)
+            else:
                 normalized_target = _normalize(key)
                 for name_key, code_val in cmap.items():
                     if _normalize(name_key) == normalized_target:
                         company_code = code_val
-                        print(f"Found normalized match: {name_key} -> {company_code}")
+                        logger.info("[MATCH] Bigshare normalized match '%s' -> Code: %s", name_key, company_code)
                         break
             
             if not company_code:
-                # Fallback: substring containment (both directions)
                 for name_key, code_val in cmap.items():
                     if key in name_key or name_key in key:
                         company_code = code_val
-                        print(f"Found substring match: {name_key} -> {company_code}")
+                        logger.info("[MATCH] Bigshare substring match '%s' -> Code: %s", name_key, company_code)
                         break
-        print("final company_code", company_code)
+        
         if not company_code:
+            logger.warning("[NOT FOUND] IPO '%s' not found on Bigshare", target_name)
             return "IPO not yet available on Bigshare"
 
         payload = {
@@ -101,9 +101,10 @@ class BigshareClient(RegistrarClient):
             "ddlType": "0",
             "lang": "en",
         }
-        print("payload", payload)
-        r = await session.post(f"{self.HOST}/Data.aspx/FetchIpodetails", json=payload)
-        print("r", r)
+        api_url = f"{self.HOST}/Data.aspx/FetchIpodetails"
+        logger.info("[REQUEST] POST %s | CompanyCode=%s | PAN=%s", api_url, company_code, pan.upper())
+        r = await session.post(api_url, json=payload)
+        logger.info("[RESPONSE] POST %s | Status: %s", api_url, r.status_code)
         r.raise_for_status()
         html = r.json().get("d", "")
         name = allot = ""
