@@ -99,7 +99,7 @@ class ConfirmationHandler:
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
         # Add cancel option
-        keyboard.append([InlineKeyboardButton("❌ None of these", callback_data=f"fuzz_cancel:{confirmation_id}")])
+        keyboard.append([InlineKeyboardButton("🔔 None of these (Subscribe for Auto-Polling)", callback_data=f"fuzz_cancel:{confirmation_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -145,9 +145,24 @@ class ConfirmationHandler:
             return False
         
         if action == "fuzz_cancel":
-            # User canceled
+            # Save subscription for auto-polling in JSONBin
+            from bot import add_allotment_subscription, get_pan_list
+            pans = context.user_data.get('fuzzy_pans') or get_pan_list()
+            added = add_allotment_subscription(
+                chat_id=pending.chat_id,
+                ipo_name=pending.original_query,
+                registrar=pending.registrar,
+                pans=pans
+            )
             del self.pending_confirmations[confirmation_id]
-            await query.edit_message_text("❌ Fuzzy matching canceled.")
+            if added:
+                await query.edit_message_text(
+                    f"🔔 *Subscription Confirmed!*\n\n"
+                    f"We will keep polling for matches for *'{pending.original_query}'* on {pending.registrar.upper()} and notify you as soon as a match or allotment status is found.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text("❌ Failed to add subscription. Please try again.")
             return True
         
         elif action == "fuzz_confirm":
