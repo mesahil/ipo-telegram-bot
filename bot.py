@@ -29,36 +29,51 @@ JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")
 JSONBIN_BIN_ID = os.getenv("JSONBIN_BIN_ID")
 SUBSCRIBERS_FILE = "subscribers.json"
 
-def get_subscribers() -> list:
+def get_jsonbin_data() -> dict:
+    default_data = {"subscribers": [], "allotment_subscriptions": []}
     if JSONBIN_API_KEY and JSONBIN_BIN_ID:
         try:
             url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
             headers = {"X-Master-Key": JSONBIN_API_KEY}
             resp = httpx.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
-                data = resp.json()
-                record = data.get("record", [])
+                record = resp.json().get("record", {})
                 if isinstance(record, list):
-                    logger.info(f"[JSONBIN] Loaded {len(record)} subscriber(s) from Jsonbin.io")
-                    try:
-                        with open(SUBSCRIBERS_FILE, "w") as f:
-                            json.dump(record, f)
-                    except Exception:
-                        pass
-                    return record
+                    data = {"subscribers": record, "allotment_subscriptions": []}
+                elif isinstance(record, dict):
+                    data = {
+                        "subscribers": record.get("subscribers", []),
+                        "allotment_subscriptions": record.get("allotment_subscriptions", [])
+                    }
+                else:
+                    data = default_data
+                try:
+                    with open(SUBSCRIBERS_FILE, "w") as f:
+                        json.dump(data, f)
+                except Exception:
+                    pass
+                return data
         except Exception as e:
-            logger.error(f"[JSONBIN ERROR] Failed reading subscribers from Jsonbin.io: {e}")
+            logger.error(f"[JSONBIN ERROR] Failed reading data from Jsonbin.io: {e}")
 
     if not os.path.exists(SUBSCRIBERS_FILE):
-        return []
+        return default_data
     try:
         with open(SUBSCRIBERS_FILE, "r") as f:
-            return json.load(f)
+            content = json.load(f)
+            if isinstance(content, list):
+                return {"subscribers": content, "allotment_subscriptions": []}
+            elif isinstance(content, dict):
+                return {
+                    "subscribers": content.get("subscribers", []),
+                    "allotment_subscriptions": content.get("allotment_subscriptions", [])
+                }
+            return default_data
     except Exception as e:
         logger.error(f"Error reading subscribers file: {e}")
-        return []
+        return default_data
 
-def _save_subscribers(subs: list) -> bool:
+def _save_jsonbin_data(data: dict) -> bool:
     success = False
     if JSONBIN_API_KEY and JSONBIN_BIN_ID:
         try:
@@ -67,24 +82,32 @@ def _save_subscribers(subs: list) -> bool:
                 "Content-Type": "application/json",
                 "X-Master-Key": JSONBIN_API_KEY
             }
-            resp = httpx.put(url, headers=headers, json=subs, timeout=10)
+            resp = httpx.put(url, headers=headers, json=data, timeout=10)
             if resp.status_code in (200, 201):
-                logger.info(f"[JSONBIN] Saved {len(subs)} subscriber(s) to Jsonbin.io")
+                logger.info(f"[JSONBIN] Saved data to Jsonbin.io")
                 success = True
             else:
                 logger.error(f"[JSONBIN ERROR] Status {resp.status_code}: {resp.text}")
         except Exception as e:
-            logger.error(f"[JSONBIN ERROR] Failed saving subscribers to Jsonbin.io: {e}")
+            logger.error(f"[JSONBIN ERROR] Failed saving data to Jsonbin.io: {e}")
 
     try:
         with open(SUBSCRIBERS_FILE, "w") as f:
-            json.dump(subs, f)
+            json.dump(data, f)
         if not (JSONBIN_API_KEY and JSONBIN_BIN_ID):
             success = True
     except Exception as e:
         logger.error(f"Error writing local subscribers file: {e}")
 
     return success
+
+def get_subscribers() -> list:
+    return get_jsonbin_data().get("subscribers", [])
+
+def _save_subscribers(subs: list) -> bool:
+    data = get_jsonbin_data()
+    data["subscribers"] = subs
+    return _save_jsonbin_data(data)
 
 def add_subscriber(chat_id: int) -> bool:
     subs = get_subscribers()
@@ -98,6 +121,42 @@ def remove_subscriber(chat_id: int) -> bool:
     if chat_id in subs:
         subs.remove(chat_id)
         return _save_subscribers(subs)
+    return False
+
+def get_allotment_subscriptions() -> list:
+    return get_jsonbin_data().get("allotment_subscriptions", [])
+
+def add_allotment_subscription(chat_id: int, ipo_name: str, registrar: str, pans: list) -> bool:
+    data = get_jsonbin_data()
+    allot_subs = data.get("allotment_subscriptions", [])
+    sub_id = f"{chat_id}_{registrar}_{ipo_name.replace(' ', '_')}"
+    
+    for item in allot_subs:
+        if item.get("id") == sub_id:
+            item["pans"] = pans
+            item["status"] = "ACTIVE"
+            return _save_jsonbin_data(data)
+            
+    allot_subs.append({
+        "id": sub_id,
+        "chat_id": chat_id,
+        "ipo_name": ipo_name,
+        "registrar": registrar,
+        "pans": pans,
+        "created_at": datetime.now().isoformat(),
+        "status": "ACTIVE"
+    })
+    data["allotment_subscriptions"] = allot_subs
+    return _save_jsonbin_data(data)
+
+def remove_allotment_subscription(sub_id: str) -> bool:
+    data = get_jsonbin_data()
+    allot_subs = data.get("allotment_subscriptions", [])
+    initial_len = len(allot_subs)
+    allot_subs = [item for item in allot_subs if item.get("id") != sub_id]
+    if len(allot_subs) != initial_len:
+        data["allotment_subscriptions"] = allot_subs
+        return _save_jsonbin_data(data)
     return False
 
 
@@ -339,53 +398,7 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await format_and_send_market_data(context, update.effective_chat.id, market_data)
 
 
-async def scheduled_market_update(context: ContextTypes.DEFAULT_TYPE):
-    """Job callback for scheduled market updates."""
-    chat_id = context.job.chat_id
-    market_data = await fetch_ipo_market_data()
-    await format_and_send_market_data(context, chat_id, market_data)
 
-
-async def start_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start daily market updates at 9 AM."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    # Check if already scheduled
-    if user_id in scheduled_jobs:
-        await update.message.reply_text("⚠️ Daily updates are already scheduled for 9:00 AM.")
-        return
-
-    # Schedule daily job at 9:00 AM IST
-    # Note: The bot uses UTC, so 9:00 AM IST = 3:30 AM UTC
-    import pytz
-    from datetime import time
-
-    ist = pytz.timezone('Asia/Kolkata')
-    job = context.job_queue.run_daily(
-        scheduled_market_update,
-        time=time(hour=3, minute=30),  # 3:30 AM UTC = 9:00 AM IST
-        chat_id=chat_id,
-        name=str(user_id)
-    )
-
-    scheduled_jobs[user_id] = job
-    await update.message.reply_text("✅ Daily IPO market updates scheduled for 9:00 AM IST.")
-
-
-async def stop_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop daily market updates."""
-    user_id = update.effective_user.id
-
-    if user_id not in scheduled_jobs:
-        await update.message.reply_text("⚠️ No scheduled updates found.")
-        return
-
-    job = scheduled_jobs[user_id]
-    job.schedule_removal()
-    del scheduled_jobs[user_id]
-
-    await update.message.reply_text("✅ Daily updates have been stopped.")
 
 
 def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
@@ -425,7 +438,25 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         handled = await confirmation_handler.handle_confirmation_response(update, context)
         if handled:
             return
-    
+
+    # Handle subscription for allotment alerts
+    if query.data.startswith("sub_allot:"):
+        parts = query.data.split(":", 2)
+        _, registrar, ipo_name = parts
+        chat_id = update.effective_chat.id
+        pans = get_pan_list()
+        if add_allotment_subscription(chat_id, ipo_name, registrar, pans):
+            await query.edit_message_text(
+                f"🔔 *Subscription Confirmed!*\n\n"
+                f"IPO: *{ipo_name}*\n"
+                f"Registrar: *{registrar.upper()}*\n\n"
+                f"We will check periodically and send you an alert as soon as the allotment status is released.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text("❌ Failed to register subscription. Please try again.")
+        return
+
     # Original IPO callback handling
     parts = query.data.split(":", 2)
     _, registrar, ipo_name = parts
@@ -459,7 +490,15 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                         )
                         return
                 
-                await query.edit_message_text(f"❌ '{ipo_name}' is not available on {registrar.upper()}.")
+                sub_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔔 Subscribe for Allotment Alerts", callback_data=f"sub_allot:{registrar}:{ipo_name.replace(':',' ')}")]
+                ])
+                await query.edit_message_text(
+                    f"❌ Allotment status for *'{ipo_name}'* is not available on {registrar.upper()} yet.\n\n"
+                    f"Click below to get notified as soon as status is released:",
+                    reply_markup=sub_keyboard,
+                    parse_mode="Markdown"
+                )
                 return
         except Exception as e:
             if hasattr(client, 'find_fuzzy_matches'):
@@ -726,7 +765,7 @@ def main() -> None:
     application.add_handler(CommandHandler("all_active_ipo", market_command))  # new command for active IPOs
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_)"))
+    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:)"))
 
     # Add a simple health check handler
     async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1,0 +1,30 @@
+name: IPO Allotment Polling Automation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+jobs:
+  poll-allotments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run allotment polling script
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          JSONBIN_API_KEY: ${{ secrets.JSONBIN_API_KEY }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+        run: python poll_allotment.py
