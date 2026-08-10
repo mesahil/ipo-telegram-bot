@@ -148,11 +148,13 @@ class ConfirmationHandler:
             # Save subscription for auto-polling in JSONBin
             from bot import add_allotment_subscription, get_pan_list
             pans = context.user_data.get('fuzzy_pans') or get_pan_list()
+            ignored = [m.match for m in pending.matches]
             added = add_allotment_subscription(
                 chat_id=pending.chat_id,
                 ipo_name=pending.original_query,
                 registrar=pending.registrar,
-                pans=pans
+                pans=pans,
+                ignored_matches=ignored
             )
             del self.pending_confirmations[confirmation_id]
             if added:

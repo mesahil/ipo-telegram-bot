@@ -126,15 +126,22 @@ def remove_subscriber(chat_id: int) -> bool:
 def get_allotment_subscriptions() -> list:
     return get_jsonbin_data().get("allotment_subscriptions", [])
 
-def add_allotment_subscription(chat_id: int, ipo_name: str, registrar: str, pans: list) -> bool:
+def add_allotment_subscription(chat_id: int, ipo_name: str, registrar: str, pans: list, ignored_matches: list = None) -> bool:
     data = get_jsonbin_data()
     allot_subs = data.get("allotment_subscriptions", [])
-    sub_id = f"{chat_id}_{registrar}_{ipo_name.replace(' ', '_')}"
+    import hashlib
+    sub_id = f"{chat_id}_{registrar}_{hashlib.md5(ipo_name.lower().encode()).hexdigest()[:8]}"
+    
+    ignored = list(set(ignored_matches or []))
     
     for item in allot_subs:
-        if item.get("id") == sub_id:
+        if item.get("id") == sub_id or (item.get("chat_id") == chat_id and item.get("registrar") == registrar and item.get("ipo_name") == ipo_name):
+            item["id"] = sub_id
             item["pans"] = pans
             item["status"] = "ACTIVE"
+            if ignored:
+                existing_ignored = item.get("ignored_matches", [])
+                item["ignored_matches"] = list(set(existing_ignored + ignored))
             return _save_jsonbin_data(data)
             
     allot_subs.append({
@@ -143,11 +150,44 @@ def add_allotment_subscription(chat_id: int, ipo_name: str, registrar: str, pans
         "ipo_name": ipo_name,
         "registrar": registrar,
         "pans": pans,
+        "ignored_matches": ignored,
+        "notified_matches": [],
         "created_at": datetime.now().isoformat(),
         "status": "ACTIVE"
     })
     data["allotment_subscriptions"] = allot_subs
     return _save_jsonbin_data(data)
+
+def ignore_subscription_matches(sub_id: str, matches_to_ignore: list = None) -> bool:
+    data = get_jsonbin_data()
+    allot_subs = data.get("allotment_subscriptions", [])
+    updated = False
+    for item in allot_subs:
+        if item.get("id") == sub_id:
+            existing_ignored = item.get("ignored_matches", [])
+            to_add = matches_to_ignore if matches_to_ignore is not None else item.get("notified_matches", [])
+            item["ignored_matches"] = list(set(existing_ignored + to_add))
+            item["notified_matches"] = []
+            updated = True
+            break
+    if updated:
+        data["allotment_subscriptions"] = allot_subs
+        return _save_jsonbin_data(data)
+    return False
+
+def update_subscription_notified_matches(sub_id: str, notified_matches: list) -> bool:
+    data = get_jsonbin_data()
+    allot_subs = data.get("allotment_subscriptions", [])
+    updated = False
+    for item in allot_subs:
+        if item.get("id") == sub_id:
+            item["notified_matches"] = notified_matches
+            updated = True
+            break
+    if updated:
+        data["allotment_subscriptions"] = allot_subs
+        return _save_jsonbin_data(data)
+    return False
 
 def remove_allotment_subscription(sub_id: str) -> bool:
     data = get_jsonbin_data()
@@ -158,6 +198,7 @@ def remove_allotment_subscription(sub_id: str) -> bool:
         data["allotment_subscriptions"] = allot_subs
         return _save_jsonbin_data(data)
     return False
+
 
 
 # BEGIN NEW IMPLEMENTATION ---------------------------------------------
@@ -344,6 +385,99 @@ async def fetch_ipo_market_data() -> List[dict]:
             return []
 
 
+async def fetch_ipo_allotment_dates() -> dict:
+    """Fetch mapping of company names / symbols to their estimated allotment dates."""
+    import datetime as dt
+    dates_map: dict = {}
+    
+    # 1. Fetch Groww closed IPOs
+    try:
+        async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as session:
+            resp = await session.get(_GROWW_CLOSED)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("ipoList", []):
+                    closing_str = item.get("closingDate")
+                    name = (item.get("companyName") or "").strip().lower()
+                    symbol = (item.get("symbol") or "").strip().lower()
+                    if closing_str:
+                        try:
+                            c_date = dt.datetime.strptime(closing_str, "%Y-%m-%d").date()
+                            # Allotment is typically T+1 day after closing
+                            allotment_date = c_date + dt.timedelta(days=1)
+                            if name:
+                                dates_map[name] = allotment_date
+                            if symbol:
+                                dates_map[symbol] = allotment_date
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.error(f"Error fetching Groww IPO dates: {e}")
+        
+    # 2. Fetch InvestorGain data
+    try:
+        market_data = await fetch_ipo_market_data()
+        for item in market_data:
+            name = (item.get("name") or "").strip().lower()
+            boa = (item.get("boa_date") or "").strip()
+            if name and boa and boa != "NA":
+                parsed_date = None
+                for fmt in ["%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d-%b"]:
+                    try:
+                        d = dt.datetime.strptime(boa, fmt).date()
+                        if fmt == "%d-%b":
+                            d = d.replace(year=dt.datetime.now().year)
+                        parsed_date = d
+                        break
+                    except Exception:
+                        continue
+                if parsed_date:
+                    dates_map[name] = parsed_date
+    except Exception as e:
+        logger.error(f"Error fetching InvestorGain IPO dates: {e}")
+        
+    return dates_map
+
+
+def is_subscription_expired(sub: dict, ipo_dates: dict) -> tuple[bool, str]:
+    """
+    Check if an allotment subscription is expired (allotment date passed 2+ days ago).
+    Returns (is_expired, reason).
+    """
+    import datetime as dt
+    from fuzzy_matcher import FuzzyMatcher
+    
+    ipo_name = sub.get("ipo_name", "").strip().lower()
+    created_at_str = sub.get("created_at")
+    today = dt.datetime.now().date()
+    
+    # 1. Direct or Fuzzy match in ipo_dates
+    matched_date = ipo_dates.get(ipo_name)
+    if not matched_date and ipo_dates:
+        matcher = FuzzyMatcher(confidence_threshold=0.7)
+        for key, d in ipo_dates.items():
+            if matcher.calculate_similarity(ipo_name, key) >= 0.7:
+                matched_date = d
+                break
+                
+    if matched_date:
+        cutoff = matched_date + dt.timedelta(days=2)
+        if today > cutoff:
+            return True, f"allotment date ({matched_date.strftime('%d %b %Y')}) passed 2+ days ago"
+            
+    # 2. Fallback: If created_at is older than 5 days
+    if created_at_str:
+        try:
+            created_dt = dt.datetime.fromisoformat(created_at_str)
+            if (dt.datetime.now() - created_dt).days >= 5:
+                return True, f"subscription created 5+ days ago ({created_dt.strftime('%d %b %Y')}) with no status release"
+        except Exception:
+            pass
+            
+    return False, ""
+
+
+
 async def format_and_send_market_data(context, chat_id, market_data):
     """Format and send market data to a chat."""
     if not market_data:
@@ -438,6 +572,18 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         handled = await confirmation_handler.handle_confirmation_response(update, context)
         if handled:
             return
+
+    # Handle ignoring fuzzy match candidates from polling notification
+    if query.data.startswith("ignore_fuzz:"):
+        parts = query.data.split(":", 1)
+        sub_id = parts[1]
+        ignore_subscription_matches(sub_id)
+        await query.edit_message_text(
+            "🔔 *Subscription Updated*\n\n"
+            "Got it! We won't notify you about these potential matches again. We will continue monitoring for allotment status releases.",
+            parse_mode="Markdown"
+        )
+        return
 
     # Handle subscription for allotment alerts
     if query.data.startswith("sub_allot:"):
@@ -765,7 +911,7 @@ def main() -> None:
     application.add_handler(CommandHandler("all_active_ipo", market_command))  # new command for active IPOs
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:)"))
+    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:|ignore_fuzz:)"))
 
     # Add a simple health check handler
     async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):

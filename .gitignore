@@ -10,3 +10,4 @@ venv/
 
 # OS files
 .DS_Store
+subscribers.json
