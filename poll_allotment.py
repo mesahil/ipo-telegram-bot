@@ -12,6 +12,8 @@ from bot import (
     fetch_ipo_allotment_dates,
     is_subscription_expired,
     get_client_for_registrar,
+    format_allotment_result,
+    sync_auto_subscriptions,
     RegistrarClient
 )
 
@@ -27,6 +29,14 @@ async def process_subscriptions():
     if not bot_token:
         logger.error("BOT_TOKEN environment variable is missing.")
         sys.exit(1)
+
+    # 1. Sync auto-subscriptions for mainboard IPOs with GMP >= 10%
+    try:
+        newly_synced = await sync_auto_subscriptions()
+        if newly_synced:
+            logger.info(f"[POLL] Auto-synced {newly_synced} new allotment subscription(s).")
+    except Exception as e:
+        logger.error(f"[POLL ERROR] Auto-sync failed: {e}")
 
     subs = get_allotment_subscriptions()
     logger.info(f"[POLL] Found {len(subs)} active allotment subscription(s).")
@@ -145,14 +155,11 @@ async def process_subscriptions():
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 lines = [
-                    f"🎉 *Allotment Status Announced!*\n",
+                    f"*Allotment Status Announced!*\n",
                     f"*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"
                 ]
                 for pan, res in zip(pans, results):
-                    if isinstance(res, Exception):
-                        lines.append(f"`{pan}` – Error fetching status")
-                    else:
-                        lines.append(f"`{pan}` – {res}")
+                    lines.append(format_allotment_result(pan, res))
 
                 message_text = "\n".join(lines)
 

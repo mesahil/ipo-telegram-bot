@@ -231,20 +231,16 @@ class ConfirmationHandler:
                 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
+                from bot import format_allotment_result
+
                 # Format and send results for all PANs
                 message_lines = [
-                    f"📊 *Allotment Status*",
-                    f"",
-                    f"**IPO:** {selected_match.match}",
-                    f"**Registrar:** {pending.registrar.upper()}",
-                    f""
+                    f"*Allotment Status*\n",
+                    f"*IPO:* {selected_match.match}  *(Registrar: {pending.registrar.upper()})*\n"
                 ]
                 
                 for pan, result in zip(pans, results):
-                    if isinstance(result, Exception):
-                        message_lines.append(f"{pan}  –  error fetching status")
-                    else:
-                        message_lines.append(f"{pan}  –  {result}")
+                    message_lines.append(format_allotment_result(pan, result))
                 
                 await query.edit_message_text(
                     text="\n".join(message_lines),

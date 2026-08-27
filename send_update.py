@@ -5,7 +5,7 @@ import sys
 
 import httpx
 
-from bot import fetch_ipo_market_data, get_subscribers
+from bot import fetch_ipo_market_data, get_subscribers, sync_auto_subscriptions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -16,6 +16,12 @@ async def run_standalone_update():
     if not bot_token:
         logger.error("BOT_TOKEN environment variable is missing.")
         sys.exit(1)
+
+    # Sync any new Mainboard IPOs with GMP >= 10% for auto-subscribers
+    try:
+        await sync_auto_subscriptions()
+    except Exception as e:
+        logger.error(f"Error syncing auto-subscriptions in morning update: {e}")
 
     subs = get_subscribers()
     logger.info(f"Loaded {len(subs)} subscriber(s) for daily update.")
