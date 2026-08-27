@@ -13,6 +13,7 @@ from bot import (
     is_subscription_expired,
     get_client_for_registrar,
     format_allotment_result,
+    sync_auto_subscriptions,
     RegistrarClient
 )
 
@@ -28,6 +29,14 @@ async def process_subscriptions():
     if not bot_token:
         logger.error("BOT_TOKEN environment variable is missing.")
         sys.exit(1)
+
+    # 1. Sync auto-subscriptions for mainboard IPOs with GMP >= 10%
+    try:
+        newly_synced = await sync_auto_subscriptions()
+        if newly_synced:
+            logger.info(f"[POLL] Auto-synced {newly_synced} new allotment subscription(s).")
+    except Exception as e:
+        logger.error(f"[POLL ERROR] Auto-sync failed: {e}")
 
     subs = get_allotment_subscriptions()
     logger.info(f"[POLL] Found {len(subs)} active allotment subscription(s).")

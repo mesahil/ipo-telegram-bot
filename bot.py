@@ -30,7 +30,7 @@ JSONBIN_BIN_ID = os.getenv("JSONBIN_BIN_ID")
 SUBSCRIBERS_FILE = "subscribers.json"
 
 def get_jsonbin_data() -> dict:
-    default_data = {"subscribers": [], "allotment_subscriptions": []}
+    default_data = {"subscribers": [], "allotment_subscriptions": [], "auto_subscribers": []}
     if JSONBIN_API_KEY and JSONBIN_BIN_ID:
         try:
             url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
@@ -39,11 +39,12 @@ def get_jsonbin_data() -> dict:
             if resp.status_code == 200:
                 record = resp.json().get("record", {})
                 if isinstance(record, list):
-                    data = {"subscribers": record, "allotment_subscriptions": []}
+                    data = {"subscribers": record, "allotment_subscriptions": [], "auto_subscribers": []}
                 elif isinstance(record, dict):
                     data = {
                         "subscribers": record.get("subscribers", []),
-                        "allotment_subscriptions": record.get("allotment_subscriptions", [])
+                        "allotment_subscriptions": record.get("allotment_subscriptions", []),
+                        "auto_subscribers": record.get("auto_subscribers", [])
                     }
                 else:
                     data = default_data
@@ -62,11 +63,12 @@ def get_jsonbin_data() -> dict:
         with open(SUBSCRIBERS_FILE, "r") as f:
             content = json.load(f)
             if isinstance(content, list):
-                return {"subscribers": content, "allotment_subscriptions": []}
+                return {"subscribers": content, "allotment_subscriptions": [], "auto_subscribers": []}
             elif isinstance(content, dict):
                 return {
                     "subscribers": content.get("subscribers", []),
-                    "allotment_subscriptions": content.get("allotment_subscriptions", [])
+                    "allotment_subscriptions": content.get("allotment_subscriptions", []),
+                    "auto_subscribers": content.get("auto_subscribers", [])
                 }
             return default_data
     except Exception as e:
@@ -122,6 +124,31 @@ def remove_subscriber(chat_id: int) -> bool:
         subs.remove(chat_id)
         return _save_subscribers(subs)
     return False
+
+def get_auto_subscribers() -> list:
+    return get_jsonbin_data().get("auto_subscribers", [])
+
+def _save_auto_subscribers(auto_subs: list) -> bool:
+    data = get_jsonbin_data()
+    data["auto_subscribers"] = auto_subs
+    return _save_jsonbin_data(data)
+
+def add_auto_subscriber(chat_id: int) -> bool:
+    auto_subs = get_auto_subscribers()
+    if chat_id not in auto_subs:
+        auto_subs.append(chat_id)
+        return _save_auto_subscribers(auto_subs)
+    return False
+
+def remove_auto_subscriber(chat_id: int) -> bool:
+    auto_subs = get_auto_subscribers()
+    if chat_id in auto_subs:
+        auto_subs.remove(chat_id)
+        return _save_auto_subscribers(auto_subs)
+    return False
+
+def is_auto_subscribed(chat_id: int) -> bool:
+    return chat_id in get_auto_subscribers()
 
 def get_allotment_subscriptions() -> list:
     return get_jsonbin_data().get("allotment_subscriptions", [])
@@ -287,6 +314,208 @@ async def fetch_ipo_catalogue() -> list[dict]:  # noqa: D401
         catalogue = await _fetch_closed_ipos(session)
 
     return catalogue
+
+
+async def fetch_eligible_auto_ipos(session: Optional[httpx.AsyncClient] = None) -> list[dict]:
+    """
+    Fetch closed/active Mainboard IPOs with GMP >= 10.0% from Groww and InvestorGain.
+    Returns list of dicts with keys: name, symbol, registrar, gmp_pct, gmp_raw
+    """
+    async def _fetch(client: httpx.AsyncClient) -> list[dict]:
+        # 1. Fetch Mainboard unlisted closed IPOs from Groww
+        try:
+            g_resp = await client.get(_GROWW_CLOSED, headers=_HEADERS)
+            g_resp.raise_for_status()
+            g_data = g_resp.json().get("ipoList", [])
+        except Exception as e:
+            logger.error(f"[AUTO-SYNC] Error fetching closed IPOs from Groww: {e}")
+            return []
+        
+        mainboard_closed = []
+        import time
+        import datetime as dt
+        today = dt.datetime.now().date()
+        now_ms = int(time.time() * 1000)
+        for item in g_data:
+            if item.get("isSme"):
+                continue  # skip SME
+            if item.get("listingPrice") is not None:
+                continue  # already listed
+            ts = item.get("listingTimestamp") or 0
+            if ts and ts < now_ms:
+                continue
+
+            name = item.get("companyName", "").strip()
+            if not name:
+                continue
+            symbol = item.get("symbol", "")
+            rta_link = (item.get("rtaLink") or "").lower()
+            registrar = "mufg"
+            for key, val in _RTA_MAP.items():
+                if key in rta_link:
+                    registrar = val
+                    break
+
+            closing_str = item.get("closingDate")
+            fallback_allot_date = None
+            if closing_str:
+                try:
+                    fallback_allot_date = dt.datetime.strptime(closing_str, "%Y-%m-%d").date() + dt.timedelta(days=1)
+                except Exception:
+                    pass
+
+            mainboard_closed.append({
+                "name": name,
+                "symbol": symbol,
+                "registrar": registrar,
+                "fallback_allot_date": fallback_allot_date
+            })
+
+        if not mainboard_closed:
+            return []
+
+        # 2. Fetch GMP percentage and Basis of Allotment date from InvestorGain
+        now = datetime.now()
+        month = now.month
+        year = now.year
+        fy = f"{year}-{str(year + 1)[2:]}" if month >= 4 else f"{year - 1}-{str(year)[2:]}"
+        ig_url = f"https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/{month}/{year}/{fy}/0/ipo?search=&v=21-18"
+        try:
+            ig_resp = await client.get(ig_url, headers=_HEADERS)
+            ig_data = ig_resp.json().get("reportTableData", []) if ig_resp.status_code == 200 else []
+        except Exception as e:
+            logger.error(f"[AUTO-SYNC] Error fetching GMP data from InvestorGain: {e}")
+            ig_data = []
+
+        gmp_map = {}
+        for item in ig_data:
+            ig_name = item.get("~ipo_name", "").strip()
+            if not ig_name:
+                continue
+            try:
+                gmp_pct = float(item.get("~gmp_percent_calc", "0"))
+            except ValueError:
+                gmp_pct = 0.0
+
+            boa_str = item.get("~Srt_BoA_Dt") or ""
+            boa_date = None
+            if boa_str:
+                try:
+                    boa_date = dt.datetime.strptime(boa_str, "%Y-%m-%d").date()
+                except Exception:
+                    pass
+
+            gmp_map[ig_name.lower()] = {
+                "name": ig_name,
+                "gmp_pct": gmp_pct,
+                "gmp_raw": item.get("GMP", ""),
+                "boa_date": boa_date
+            }
+
+        # 3. Filter mainboard IPOs with GMP >= 10% AND allotment date is today or due (not in advance)
+        eligible = []
+        for mb in mainboard_closed:
+            name_low = mb["name"].lower()
+            matched_gmp = None
+            for ig_k, ig_v in gmp_map.items():
+                if ig_k in name_low or name_low in ig_k or any(w in ig_k for w in name_low.split() if len(w) > 3):
+                    matched_gmp = ig_v
+                    break
+
+            allot_date = (matched_gmp and matched_gmp.get("boa_date")) or mb.get("fallback_allot_date")
+            is_allotment_due = allot_date is not None and allot_date <= today
+
+            if is_allotment_due and matched_gmp and matched_gmp["gmp_pct"] >= 10.0:
+                eligible.append({
+                    "name": mb["name"],
+                    "symbol": mb["symbol"],
+                    "registrar": mb["registrar"],
+                    "gmp_pct": matched_gmp["gmp_pct"],
+                    "gmp_raw": matched_gmp["gmp_raw"],
+                    "allotment_date": allot_date
+                })
+
+        return eligible
+
+    if session is not None:
+        return await _fetch(session)
+    else:
+        async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
+            return await _fetch(client)
+
+
+async def sync_auto_subscriptions() -> int:
+    """
+    Sync all active auto-subscribers with current eligible Mainboard IPOs (GMP >= 10%).
+    Performs batched deduplication and writes once to avoid JSONBin rate limits.
+    Returns the number of new subscriptions added.
+    """
+    data = get_jsonbin_data()
+    auto_subs = data.get("auto_subscribers", [])
+    if not auto_subs:
+        return 0
+
+    pans = get_pan_list()
+    if not pans:
+        logger.warning("[AUTO-SYNC] No PANs configured in PAN_LIST.")
+        return 0
+
+    try:
+        eligible_ipos = await fetch_eligible_auto_ipos()
+    except Exception as e:
+        logger.error(f"[AUTO-SYNC ERROR] Failed fetching eligible IPOs: {e}")
+        return 0
+
+    if not eligible_ipos:
+        logger.info("[AUTO-SYNC] No eligible Mainboard IPOs with GMP >= 10% found.")
+        return 0
+
+    allot_subs = data.get("allotment_subscriptions", [])
+    import hashlib
+
+    # Build existing lookup set of (chat_id, registrar, ipo_name) and sub_id
+    existing_keys = set()
+    for item in allot_subs:
+        existing_keys.add(item.get("id"))
+        c_id = item.get("chat_id")
+        reg = (item.get("registrar") or "").lower()
+        ipo_n = (item.get("ipo_name") or "").strip().lower()
+        if c_id and reg and ipo_n:
+            existing_keys.add((c_id, reg, ipo_n))
+
+    added_count = 0
+    for chat_id in auto_subs:
+        for ipo in eligible_ipos:
+            ipo_name = ipo["name"]
+            registrar = ipo["registrar"]
+            sub_id = f"{chat_id}_{registrar}_{hashlib.md5(ipo_name.lower().encode()).hexdigest()[:8]}"
+            key_tuple = (chat_id, registrar.lower(), ipo_name.strip().lower())
+
+            if sub_id in existing_keys or key_tuple in existing_keys:
+                continue  # already subscribed! Skip to prevent duplicates
+
+            allot_subs.append({
+                "id": sub_id,
+                "chat_id": chat_id,
+                "ipo_name": ipo_name,
+                "registrar": registrar,
+                "pans": pans,
+                "ignored_matches": [],
+                "notified_matches": [],
+                "created_at": datetime.now().isoformat(),
+                "status": "ACTIVE"
+            })
+            existing_keys.add(sub_id)
+            existing_keys.add(key_tuple)
+            added_count += 1
+            logger.info(f"[AUTO-SYNC] Subscribed chat_id {chat_id} to '{ipo_name}' ({registrar.upper()}, GMP: {ipo['gmp_pct']}%)")
+
+    if added_count > 0:
+        data["allotment_subscriptions"] = allot_subs
+        _save_jsonbin_data(data)
+
+    return added_count
+
 
 # END NEW IMPLEMENTATION -----------------------------------------------
 
@@ -860,6 +1089,55 @@ async def send_daily_updates(application: Application) -> None:
             logger.error(f"Failed to send daily update to {chat_id}: {e}")
 
 
+async def subscribe_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enable auto-subscription to all Mainboard IPOs with GMP >= 10%."""
+    chat_id = update.effective_chat.id
+    pans = get_pan_list()
+    if not pans:
+        await update.message.reply_text("❌ No PANs configured. Please set `PAN_LIST` in environment variables.", parse_mode="Markdown")
+        return
+
+    add_auto_subscriber(chat_id)
+
+    # Immediately sync current eligible IPOs
+    await sync_auto_subscriptions()
+    eligible = await fetch_eligible_auto_ipos()
+
+    lines = [
+        "✅ *Auto-Subscription Enabled!*\n",
+        "You are now automatically subscribed to all current & future **Mainboard IPOs** with **GMP ≥ 10%**.\n"
+    ]
+
+    if eligible:
+        lines.append("*Currently Subscribed IPOs:*")
+        for ipo in eligible:
+            lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
+    else:
+        lines.append("No Mainboard IPOs currently meet the 10% GMP threshold. You will be automatically subscribed as soon as eligible IPOs are released.")
+
+    lines.append("\nUse /unsubscribe_all anytime to disable auto-tracking.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def unsubscribe_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Disable auto-subscription to Mainboard IPOs."""
+    chat_id = update.effective_chat.id
+    removed = remove_auto_subscriber(chat_id)
+    if removed:
+        await update.message.reply_text(
+            "🚫 *Auto-Subscription Disabled!*\n\n"
+            "You will no longer be automatically subscribed to future Mainboard IPOs.\n\n"
+            "*(Note: Existing pending subscriptions remain active until allotment is announced.)*",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ You are not currently auto-subscribed.\n\nUse /subscribe_all to enable automatic tracking for Mainboard IPOs with GMP ≥ 10%.",
+            parse_mode="Markdown"
+        )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help message with available commands."""
     help_text = """
@@ -868,6 +1146,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *IPO Services:*
 /closed_ipo - Show closed IPOs and check allotment status
 /all_active_ipo - Show all active IPOs with GMP data
+/subscribe_all - Auto-subscribe to all Mainboard IPOs with GMP ≥ 10%
+/unsubscribe_all - Disable automatic tracking for future IPOs
 /subscribe - Subscribe to daily updates at 9:00 AM IST
 /unsubscribe - Unsubscribe from daily updates
 
@@ -876,11 +1156,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Show this help message
 
 *How to use:*
-1. Use /closed_ipo to see closed IPOs and check allotment status
-2. Click on an IPO name to check your allotment status
-3. Use /all_active_ipo to see active IPOs with GMP data
-4. Use /subscribe to receive automated updates every morning
-5. Legacy commands /list and /market still work
+1. Use /subscribe_all to automatically track all high-GMP (≥10%) Mainboard IPOs
+2. Use /closed_ipo to see closed IPOs and check allotment status
+3. Click on an IPO name to check your allotment status
+4. Use /all_active_ipo to see active IPOs with GMP data
+5. Use /subscribe to receive automated updates every morning
     """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -892,6 +1172,8 @@ async def setup_bot_commands(application: Application) -> None:
         BotCommand("health", "Check if bot is running"),
         BotCommand("closed_ipo", "Show closed IPOs and check allotment status"),
         BotCommand("all_active_ipo", "Show all active IPOs with GMP data"),
+        BotCommand("subscribe_all", "Auto-track Mainboard IPOs (GMP ≥ 10%)"),
+        BotCommand("unsubscribe_all", "Disable auto-tracking for Mainboard IPOs"),
         BotCommand("subscribe", "Subscribe to daily morning updates"),
         BotCommand("unsubscribe", "Unsubscribe from daily updates"),
     ]
@@ -962,6 +1244,8 @@ def main() -> None:
     application.add_handler(CommandHandler("all_active_ipo", market_command))  # new command for active IPOs
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+    application.add_handler(CommandHandler("subscribe_all", subscribe_all_command))
+    application.add_handler(CommandHandler("unsubscribe_all", unsubscribe_all_command))
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:|ignore_fuzz:)"))
 
     # Add a simple health check handler
