@@ -156,27 +156,30 @@ def remove_subscriber(chat_id: int) -> bool:
 def get_auto_subscribers() -> list:
     return get_jsonbin_data().get("auto_subscribers", [])
 
-def _save_auto_subscribers(auto_subs: list) -> bool:
+def is_auto_subscribed(chat_id: Union[int, str]) -> bool:
+    subs = get_auto_subscribers()
+    cid_int = int(chat_id) if str(chat_id).lstrip("-").isdigit() else None
+    cid_str = str(chat_id)
+    return (chat_id in subs) or (cid_int is not None and cid_int in subs) or (cid_str in subs)
+
+def add_auto_subscriber(chat_id: Union[int, str]) -> bool:
     data = get_jsonbin_data()
-    data["auto_subscribers"] = auto_subs
+    auto_subs = list(data.get("auto_subscribers", []))
+    cid_int = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
+    if not is_auto_subscribed(chat_id):
+        auto_subs.append(cid_int)
+        data["auto_subscribers"] = auto_subs
+        return _save_jsonbin_data(data)
+    return True
+
+def remove_auto_subscriber(chat_id: Union[int, str]) -> bool:
+    data = get_jsonbin_data()
+    auto_subs = list(data.get("auto_subscribers", []))
+    cid_int = int(chat_id) if str(chat_id).lstrip("-").isdigit() else None
+    cid_str = str(chat_id)
+    new_subs = [s for s in auto_subs if s != chat_id and s != cid_int and s != cid_str]
+    data["auto_subscribers"] = new_subs
     return _save_jsonbin_data(data)
-
-def add_auto_subscriber(chat_id: int) -> bool:
-    auto_subs = get_auto_subscribers()
-    if chat_id not in auto_subs:
-        auto_subs.append(chat_id)
-        return _save_auto_subscribers(auto_subs)
-    return False
-
-def remove_auto_subscriber(chat_id: int) -> bool:
-    auto_subs = get_auto_subscribers()
-    if chat_id in auto_subs:
-        auto_subs.remove(chat_id)
-        return _save_auto_subscribers(auto_subs)
-    return False
-
-def is_auto_subscribed(chat_id: int) -> bool:
-    return chat_id in get_auto_subscribers()
 
 def get_allotment_subscriptions() -> list:
     return get_jsonbin_data().get("allotment_subscriptions", [])
@@ -797,9 +800,9 @@ def build_auto_sub_button(chat_id: int) -> InlineKeyboardButton:
     """Build dynamic single toggle button based on current user auto-subscription state."""
     is_sub = is_auto_subscribed(chat_id)
     if is_sub:
-        return InlineKeyboardButton("🔕 Disable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto:off")
+        return InlineKeyboardButton("🔕 Disable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto")
     else:
-        return InlineKeyboardButton("🔔 Enable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto:on")
+        return InlineKeyboardButton("🔔 Enable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto")
 
 
 def build_keyboard(catalogue: List[dict], chat_id: Optional[int] = None) -> InlineKeyboardMarkup:
@@ -889,32 +892,55 @@ def format_allotment_result(pan: str, result: Union[str, Exception]) -> str:
 
 async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
 
     # Handle toggle auto-subscription button
-    if query.data.startswith("toggle_auto:"):
-        action = query.data.split(":", 1)[1]  # "on" or "off"
+    if query.data.startswith("toggle_auto"):
         chat_id = update.effective_chat.id
         pans = get_pan_list()
+        currently_sub = is_auto_subscribed(chat_id)
 
-        if action == "on":
+        if not currently_sub:
+            # Currently OFF -> Turn ON
             if not pans:
-                await query.edit_message_text("❌ No PANs configured. Please set `PAN_LIST` in environment variables.", parse_mode="Markdown")
+                await query.answer("❌ No PANs configured in PAN_LIST.", show_alert=True)
                 return
             add_auto_subscriber(chat_id)
             await sync_auto_subscriptions()
-            eligible = await fetch_eligible_auto_ipos()
+            await query.answer("Auto-tracking enabled! ✅", show_alert=False)
+        else:
+            # Currently ON -> Turn OFF
+            remove_auto_subscriber(chat_id)
+            await query.answer("Auto-tracking disabled! 🚫", show_alert=False)
 
-            lines = [
-                "✅ *Auto-Subscription Enabled!*\n",
-                "You are now automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
-            ]
-            if eligible:
-                lines.append("*Currently Subscribed for Today:*")
-                for ipo in eligible:
-                    lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
+        msg_text = (query.message.text or "")
+        if "Select an IPO" in msg_text:
+            # If clicked on /closed_ipo or /start list, keep the IPO buttons and update bottom toggle button
+            catalogue = await fetch_ipo_catalogue()
+            keyboard = build_keyboard(catalogue, chat_id=chat_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+            except Exception:
+                pass
+        else:
+            # If clicked on /auto_subscribe message, update text and button
+            new_is_sub = is_auto_subscribed(chat_id)
+            if new_is_sub:
+                eligible = await fetch_eligible_auto_ipos()
+                lines = [
+                    "⚡ *Auto-Tracking Status: ACTIVE (Enabled)*\n",
+                    "You are automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
+                ]
+                if eligible:
+                    lines.append("*Currently Subscribed for Today:*")
+                    for ipo in eligible:
+                        lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
+                else:
+                    lines.append("No Mainboard IPOs currently have allotment scheduled for today.")
             else:
-                lines.append("No Mainboard IPOs currently have allotment scheduled for today.")
+                lines = [
+                    "⚡ *Auto-Tracking Status: INACTIVE (Disabled)*\n",
+                    "Click the button below to automatically track all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day without manual selection."
+                ]
 
             new_keyboard = InlineKeyboardMarkup([
                 [build_auto_sub_button(chat_id)]
@@ -923,26 +949,9 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await query.edit_message_text("\n".join(lines), reply_markup=new_keyboard, parse_mode="Markdown")
             except Exception:
                 await query.edit_message_text("\n".join(lines), reply_markup=new_keyboard)
-        else:
-            remove_auto_subscriber(chat_id)
-            new_keyboard = InlineKeyboardMarkup([
-                [build_auto_sub_button(chat_id)]
-            ])
-            try:
-                await query.edit_message_text(
-                    "🚫 *Auto-Subscription Disabled!*\n\n"
-                    "You will no longer be automatically subscribed to future Mainboard IPOs.\n\n"
-                    "*(Note: Existing pending subscriptions remain active until allotment is announced.)*",
-                    reply_markup=new_keyboard,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                await query.edit_message_text(
-                    "🚫 *Auto-Subscription Disabled!*\n\n"
-                    "You will no longer be automatically subscribed to future Mainboard IPOs.",
-                    reply_markup=new_keyboard
-                )
         return
+
+    await query.answer()
     
     # Handle fuzzy match confirmations
     if query.data.startswith("fuzz_"):
