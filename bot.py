@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import httpx
 import json
@@ -562,6 +562,59 @@ def get_pan_list() -> List[str]:
     return [p.strip().upper() for p in pans_env.split(",") if p.strip()]
 
 
+def format_allotment_result(pan: str, result: Union[str, Exception]) -> str:
+    """Format individual PAN allotment status with clean indicators and status details."""
+    if isinstance(result, Exception):
+        return f"⚠️ {pan} - Status: Error fetching status"
+    
+    text = str(result).strip()
+    if not text:
+        return f"🔴 {pan} - Status: Not Allotted"
+    
+    if any(err_kw in text.lower() for err_kw in ["error fetching", "unable to fetch"]):
+        return f"⚠️ {pan} - Status: Error fetching status"
+    
+    if any(nf_kw in text.lower() for nf_kw in ["no record", "not available", "not yet available"]):
+        return f"🔴 {pan} - Status: Not Allotted"
+
+    def _format_single(record_text: str) -> str:
+        name = None
+        name_match = re.search(r"Name:\s*([^|\n\r]+)", record_text, re.IGNORECASE)
+        if name_match:
+            extracted = name_match.group(1).strip()
+            if extracted and extracted.upper() not in ["NONE", "NULL", ""]:
+                name = extracted
+
+        shares_str = None
+        allot_match = re.search(r"(?:ALLOTED|Allotted|ALLOT|Shares):\s*([0-9]+(?:\.[0-9]+)?)", record_text, re.IGNORECASE)
+        if allot_match:
+            shares_str = allot_match.group(1).strip()
+
+        display_name = name if name else pan
+
+        is_allotted = False
+        shares_count = 0
+        if shares_str:
+            try:
+                val = float(shares_str)
+                if val > 0:
+                    is_allotted = True
+                    shares_count = int(val) if val.is_integer() else val
+            except ValueError:
+                pass
+
+        if is_allotted:
+            return f"🟢 {display_name} - Status: Allotted | Shares: {shares_count}"
+        else:
+            return f"🔴 {display_name} - Status: Not Allotted"
+
+    if "\n\n" in text:
+        sub_records = [r for r in text.split("\n\n") if r.strip()]
+        return "\n".join(_format_single(sub) for sub in sub_records)
+    
+    return _format_single(text)
+
+
 async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -666,13 +719,11 @@ async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Format and send results for all PANs
-    lines = [f"\n*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"]
+    lines = [f"*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"]
     for pan, result in zip(pans, results):
         if isinstance(result, Exception):
             logger.error("[ERROR] Exception fetching status for PAN %s: %s", pan, result)
-            lines.append(f"{pan}  –  error fetching status")
-        else:
-            lines.append(f"{pan}  –  {result}")
+        lines.append(format_allotment_result(pan, result))
 
     full_text = "\n".join(lines)
     logger.info("[ACTION] Completed allotment check for '%s' | PAN count: %d | Total response length: %d chars", ipo_name, len(pans), len(full_text))

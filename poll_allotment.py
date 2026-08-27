@@ -12,6 +12,7 @@ from bot import (
     fetch_ipo_allotment_dates,
     is_subscription_expired,
     get_client_for_registrar,
+    format_allotment_result,
     RegistrarClient
 )
 
@@ -145,14 +146,11 @@ async def process_subscriptions():
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 lines = [
-                    f"🎉 *Allotment Status Announced!*\n",
+                    f"*Allotment Status Announced!*\n",
                     f"*IPO:* {ipo_name}  *(Registrar: {registrar.upper()})*\n"
                 ]
                 for pan, res in zip(pans, results):
-                    if isinstance(res, Exception):
-                        lines.append(f"`{pan}` – Error fetching status")
-                    else:
-                        lines.append(f"`{pan}` – {res}")
+                    lines.append(format_allotment_result(pan, res))
 
                 message_text = "\n".join(lines)
 
