@@ -29,8 +29,23 @@ JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")
 JSONBIN_BIN_ID = os.getenv("JSONBIN_BIN_ID")
 SUBSCRIBERS_FILE = "subscribers.json"
 
-def get_jsonbin_data() -> dict:
+_DATA_CACHE: Optional[dict] = None
+_CACHE_TIMESTAMP: float = 0.0
+_CACHE_TTL_SECONDS: float = 60.0
+
+
+def get_jsonbin_data(force_refresh: bool = False) -> dict:
+    global _DATA_CACHE, _CACHE_TIMESTAMP
+    import time
+    now = time.time()
+
+    # Fast in-memory cache check to prevent repetitive HTTP GET calls to JSONBin
+    if not force_refresh and _DATA_CACHE is not None and (now - _CACHE_TIMESTAMP) < _CACHE_TTL_SECONDS:
+        return _DATA_CACHE
+
     default_data = {"subscribers": [], "allotment_subscriptions": [], "auto_subscribers": []}
+    data = None
+
     if JSONBIN_API_KEY and JSONBIN_BIN_ID:
         try:
             url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
@@ -53,29 +68,42 @@ def get_jsonbin_data() -> dict:
                         json.dump(data, f)
                 except Exception:
                     pass
-                return data
         except Exception as e:
             logger.error(f"[JSONBIN ERROR] Failed reading data from Jsonbin.io: {e}")
 
-    if not os.path.exists(SUBSCRIBERS_FILE):
-        return default_data
-    try:
-        with open(SUBSCRIBERS_FILE, "r") as f:
-            content = json.load(f)
-            if isinstance(content, list):
-                return {"subscribers": content, "allotment_subscriptions": [], "auto_subscribers": []}
-            elif isinstance(content, dict):
-                return {
-                    "subscribers": content.get("subscribers", []),
-                    "allotment_subscriptions": content.get("allotment_subscriptions", []),
-                    "auto_subscribers": content.get("auto_subscribers", [])
-                }
-            return default_data
-    except Exception as e:
-        logger.error(f"Error reading subscribers file: {e}")
-        return default_data
+    if data is None:
+        if os.path.exists(SUBSCRIBERS_FILE):
+            try:
+                with open(SUBSCRIBERS_FILE, "r") as f:
+                    content = json.load(f)
+                    if isinstance(content, list):
+                        data = {"subscribers": content, "allotment_subscriptions": [], "auto_subscribers": []}
+                    elif isinstance(content, dict):
+                        data = {
+                            "subscribers": content.get("subscribers", []),
+                            "allotment_subscriptions": content.get("allotment_subscriptions", []),
+                            "auto_subscribers": content.get("auto_subscribers", [])
+                        }
+                    else:
+                        data = default_data
+            except Exception as e:
+                logger.error(f"Error reading subscribers file: {e}")
+                data = default_data
+        else:
+            data = default_data
+
+    _DATA_CACHE = data
+    _CACHE_TIMESTAMP = now
+    return data
+
 
 def _save_jsonbin_data(data: dict) -> bool:
+    global _DATA_CACHE, _CACHE_TIMESTAMP
+    import time
+    # Immediately update memory cache (write-through)
+    _DATA_CACHE = data
+    _CACHE_TIMESTAMP = time.time()
+
     success = False
     if JSONBIN_API_KEY and JSONBIN_BIN_ID:
         try:
@@ -448,6 +476,7 @@ async def sync_auto_subscriptions() -> int:
     """
     Sync all active auto-subscribers with current eligible Mainboard IPOs (GMP >= 10%).
     Performs batched deduplication and writes once to avoid JSONBin rate limits.
+    Runs completely silently in the background.
     Returns the number of new subscriptions added.
     """
     data = get_jsonbin_data()
@@ -764,7 +793,16 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
+def build_auto_sub_button(chat_id: int) -> InlineKeyboardButton:
+    """Build dynamic single toggle button based on current user auto-subscription state."""
+    is_sub = is_auto_subscribed(chat_id)
+    if is_sub:
+        return InlineKeyboardButton("🔕 Disable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto:off")
+    else:
+        return InlineKeyboardButton("🔔 Enable Auto-Tracking (GMP ≥ 10%)", callback_data="toggle_auto:on")
+
+
+def build_keyboard(catalogue: List[dict], chat_id: Optional[int] = None) -> InlineKeyboardMarkup:
     buttons: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for idx, ipo in enumerate(catalogue, start=1):
@@ -775,13 +813,18 @@ def build_keyboard(catalogue: List[dict]) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+
+    if chat_id is not None:
+        buttons.append([build_auto_sub_button(chat_id)])
+
     return InlineKeyboardMarkup(buttons)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):  # /start or /list
+    chat_id = update.effective_chat.id
     catalogue = await fetch_ipo_catalogue()
-    keyboard = build_keyboard(catalogue)
-    await update.message.reply_text("Select an IPO to fetch allotment status:", reply_markup=keyboard)
+    keyboard = build_keyboard(catalogue, chat_id=chat_id)
+    await update.message.reply_text("Select an IPO to fetch allotment status or toggle auto-tracking:", reply_markup=keyboard)
 
 
 def get_pan_list() -> List[str]:
@@ -847,6 +890,59 @@ def format_allotment_result(pan: str, result: Union[str, Exception]) -> str:
 async def handle_ipo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Handle toggle auto-subscription button
+    if query.data.startswith("toggle_auto:"):
+        action = query.data.split(":", 1)[1]  # "on" or "off"
+        chat_id = update.effective_chat.id
+        pans = get_pan_list()
+
+        if action == "on":
+            if not pans:
+                await query.edit_message_text("❌ No PANs configured. Please set `PAN_LIST` in environment variables.", parse_mode="Markdown")
+                return
+            add_auto_subscriber(chat_id)
+            await sync_auto_subscriptions()
+            eligible = await fetch_eligible_auto_ipos()
+
+            lines = [
+                "✅ *Auto-Subscription Enabled!*\n",
+                "You are now automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
+            ]
+            if eligible:
+                lines.append("*Currently Subscribed for Today:*")
+                for ipo in eligible:
+                    lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
+            else:
+                lines.append("No Mainboard IPOs currently have allotment scheduled for today.")
+
+            new_keyboard = InlineKeyboardMarkup([
+                [build_auto_sub_button(chat_id)]
+            ])
+            try:
+                await query.edit_message_text("\n".join(lines), reply_markup=new_keyboard, parse_mode="Markdown")
+            except Exception:
+                await query.edit_message_text("\n".join(lines), reply_markup=new_keyboard)
+        else:
+            remove_auto_subscriber(chat_id)
+            new_keyboard = InlineKeyboardMarkup([
+                [build_auto_sub_button(chat_id)]
+            ])
+            try:
+                await query.edit_message_text(
+                    "🚫 *Auto-Subscription Disabled!*\n\n"
+                    "You will no longer be automatically subscribed to future Mainboard IPOs.\n\n"
+                    "*(Note: Existing pending subscriptions remain active until allotment is announced.)*",
+                    reply_markup=new_keyboard,
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                await query.edit_message_text(
+                    "🚫 *Auto-Subscription Disabled!*\n\n"
+                    "You will no longer be automatically subscribed to future Mainboard IPOs.",
+                    reply_markup=new_keyboard
+                )
+        return
     
     # Handle fuzzy match confirmations
     if query.data.startswith("fuzz_"):
@@ -1105,15 +1201,15 @@ async def subscribe_all_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     lines = [
         "✅ *Auto-Subscription Enabled!*\n",
-        "You are now automatically subscribed to all current & future **Mainboard IPOs** with **GMP ≥ 10%**.\n"
+        "You are now automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
     ]
 
     if eligible:
-        lines.append("*Currently Subscribed IPOs:*")
+        lines.append("*Currently Subscribed for Today:*")
         for ipo in eligible:
             lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
     else:
-        lines.append("No Mainboard IPOs currently meet the 10% GMP threshold. You will be automatically subscribed as soon as eligible IPOs are released.")
+        lines.append("No Mainboard IPOs currently have allotment scheduled for today. You will be automatically enrolled on the day eligible IPO allotments open.")
 
     lines.append("\nUse /unsubscribe_all anytime to disable auto-tracking.")
 
@@ -1138,6 +1234,36 @@ async def unsubscribe_all_command(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
+async def auto_subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current auto-subscription status with an inline toggle button."""
+    chat_id = update.effective_chat.id
+    is_sub = is_auto_subscribed(chat_id)
+
+    keyboard = InlineKeyboardMarkup([
+        [build_auto_sub_button(chat_id)]
+    ])
+
+    if is_sub:
+        eligible = await fetch_eligible_auto_ipos()
+        lines = [
+            "⚡ *Auto-Tracking Status: ACTIVE (Enabled)*\n",
+            "You are automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
+        ]
+        if eligible:
+            lines.append("*Subscribed for Allotment Today:*")
+            for ipo in eligible:
+                lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
+        else:
+            lines.append("No Mainboard IPOs currently have allotment scheduled for today.")
+    else:
+        lines = [
+            "⚡ *Auto-Tracking Status: INACTIVE (Disabled)*\n",
+            "Click the button below to automatically track all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day without manual selection."
+        ]
+
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help message with available commands."""
     help_text = """
@@ -1146,6 +1272,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *IPO Services:*
 /closed_ipo - Show closed IPOs and check allotment status
 /all_active_ipo - Show all active IPOs with GMP data
+/auto_subscribe - Toggle auto-tracking for Mainboard IPOs (GMP ≥ 10%)
 /subscribe_all - Auto-subscribe to all Mainboard IPOs with GMP ≥ 10%
 /unsubscribe_all - Disable automatic tracking for future IPOs
 /subscribe - Subscribe to daily updates at 9:00 AM IST
@@ -1156,7 +1283,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Show this help message
 
 *How to use:*
-1. Use /subscribe_all to automatically track all high-GMP (≥10%) Mainboard IPOs
+1. Use /auto_subscribe to toggle auto-tracking with 1 click
 2. Use /closed_ipo to see closed IPOs and check allotment status
 3. Click on an IPO name to check your allotment status
 4. Use /all_active_ipo to see active IPOs with GMP data
@@ -1172,7 +1299,8 @@ async def setup_bot_commands(application: Application) -> None:
         BotCommand("health", "Check if bot is running"),
         BotCommand("closed_ipo", "Show closed IPOs and check allotment status"),
         BotCommand("all_active_ipo", "Show all active IPOs with GMP data"),
-        BotCommand("subscribe_all", "Auto-track Mainboard IPOs (GMP ≥ 10%)"),
+        BotCommand("auto_subscribe", "Toggle auto-tracking (GMP ≥ 10%)"),
+        BotCommand("subscribe_all", "Enable auto-tracking for Mainboard IPOs"),
         BotCommand("unsubscribe_all", "Disable auto-tracking for Mainboard IPOs"),
         BotCommand("subscribe", "Subscribe to daily morning updates"),
         BotCommand("unsubscribe", "Unsubscribe from daily updates"),
@@ -1244,9 +1372,11 @@ def main() -> None:
     application.add_handler(CommandHandler("all_active_ipo", market_command))  # new command for active IPOs
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+    application.add_handler(CommandHandler("auto_subscribe", auto_subscribe_command))
+    application.add_handler(CommandHandler("auto_tracking", auto_subscribe_command))
     application.add_handler(CommandHandler("subscribe_all", subscribe_all_command))
     application.add_handler(CommandHandler("unsubscribe_all", unsubscribe_all_command))
-    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:|ignore_fuzz:)"))
+    application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:|ignore_fuzz:|toggle_auto:)"))
 
     # Add a simple health check handler
     async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
