@@ -1185,55 +1185,6 @@ async def send_daily_updates(application: Application) -> None:
             logger.error(f"Failed to send daily update to {chat_id}: {e}")
 
 
-async def subscribe_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enable auto-subscription to all Mainboard IPOs with GMP >= 10%."""
-    chat_id = update.effective_chat.id
-    pans = get_pan_list()
-    if not pans:
-        await update.message.reply_text("❌ No PANs configured. Please set `PAN_LIST` in environment variables.", parse_mode="Markdown")
-        return
-
-    add_auto_subscriber(chat_id)
-
-    # Immediately sync current eligible IPOs
-    await sync_auto_subscriptions()
-    eligible = await fetch_eligible_auto_ipos()
-
-    lines = [
-        "✅ *Auto-Subscription Enabled!*\n",
-        "You are now automatically subscribed to all **Mainboard IPOs** with **GMP ≥ 10%** on their allotment day.\n"
-    ]
-
-    if eligible:
-        lines.append("*Currently Subscribed for Today:*")
-        for ipo in eligible:
-            lines.append(f"• *{ipo['name']}* ({ipo['registrar'].upper()}) – GMP: {ipo['gmp_pct']:.1f}%")
-    else:
-        lines.append("No Mainboard IPOs currently have allotment scheduled for today. You will be automatically enrolled on the day eligible IPO allotments open.")
-
-    lines.append("\nUse /unsubscribe_all anytime to disable auto-tracking.")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def unsubscribe_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Disable auto-subscription to Mainboard IPOs."""
-    chat_id = update.effective_chat.id
-    removed = remove_auto_subscriber(chat_id)
-    if removed:
-        await update.message.reply_text(
-            "🚫 *Auto-Subscription Disabled!*\n\n"
-            "You will no longer be automatically subscribed to future Mainboard IPOs.\n\n"
-            "*(Note: Existing pending subscriptions remain active until allotment is announced.)*",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            "ℹ️ You are not currently auto-subscribed.\n\nUse /subscribe_all to enable automatic tracking for Mainboard IPOs with GMP ≥ 10%.",
-            parse_mode="Markdown"
-        )
-
-
 async def auto_subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current auto-subscription status with an inline toggle button."""
     chat_id = update.effective_chat.id
@@ -1273,8 +1224,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /closed_ipo - Show closed IPOs and check allotment status
 /all_active_ipo - Show all active IPOs with GMP data
 /auto_subscribe - Toggle auto-tracking for Mainboard IPOs (GMP ≥ 10%)
-/subscribe_all - Auto-subscribe to all Mainboard IPOs with GMP ≥ 10%
-/unsubscribe_all - Disable automatic tracking for future IPOs
 /subscribe - Subscribe to daily updates at 9:00 AM IST
 /unsubscribe - Unsubscribe from daily updates
 
@@ -1300,8 +1249,6 @@ async def setup_bot_commands(application: Application) -> None:
         BotCommand("closed_ipo", "Show closed IPOs and check allotment status"),
         BotCommand("all_active_ipo", "Show all active IPOs with GMP data"),
         BotCommand("auto_subscribe", "Toggle auto-tracking (GMP ≥ 10%)"),
-        BotCommand("subscribe_all", "Enable auto-tracking for Mainboard IPOs"),
-        BotCommand("unsubscribe_all", "Disable auto-tracking for Mainboard IPOs"),
         BotCommand("subscribe", "Subscribe to daily morning updates"),
         BotCommand("unsubscribe", "Unsubscribe from daily updates"),
     ]
@@ -1374,8 +1321,6 @@ def main() -> None:
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
     application.add_handler(CommandHandler("auto_subscribe", auto_subscribe_command))
     application.add_handler(CommandHandler("auto_tracking", auto_subscribe_command))
-    application.add_handler(CommandHandler("subscribe_all", subscribe_all_command))
-    application.add_handler(CommandHandler("unsubscribe_all", unsubscribe_all_command))
     application.add_handler(CallbackQueryHandler(handle_ipo_callback, pattern=r"^(ipo:|fuzz_|sub_allot:|ignore_fuzz:|toggle_auto:)"))
 
     # Add a simple health check handler
